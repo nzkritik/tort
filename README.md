@@ -2,9 +2,10 @@
 
 Run applications inside a network namespace whose only route out is Tor.
 
-> **Prototype.** The design is sound and the safety properties are tested, but
-> this has had far less real-world exposure than the tools it borrows ideas
-> from. Read the "What this does not cover" section before relying on it.
+> **Prototype.** The end-to-end path is verified working - traffic from the
+> namespace exits through Tor, confirmed by check.torproject.org - but this has
+> had far less real-world exposure than the tools it borrows ideas from, on one
+> machine, once. Read "What this does not cover" before relying on it.
 
 ## The idea
 
@@ -89,6 +90,22 @@ that runs in-process under sudo. A socket-activated root daemon with a polkit
 policy can be added as a second implementation without touching the logic,
 turning the privilege boundary into four verbs rather than "may run arbitrary
 commands as root".
+
+## Verifying it works
+
+`scripts/smoke-test.sh` runs the whole lifecycle as root, snapshots the host
+firewall before and after, and prints the rule counters. A healthy run shows:
+
+```
+traffic test : {"IsTor":true,"IP":"..."}
+firewall     : unchanged - tort left no structural trace
+```
+
+The counters are the useful part when something is wrong. `forward ... drop` at
+zero packets means nothing escaped the namespace; a redirect counter at zero
+means traffic never reached the rule at all, which is a different problem from a
+non-zero counter with no connectivity - that means something downstream dropped
+it.
 
 ## Coexisting with a host firewall
 

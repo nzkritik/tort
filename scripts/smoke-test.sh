@@ -41,8 +41,13 @@ section "orphans from previous runs"
 pgrep -af "/run/tort/torrc" || echo "(none - clean start)"
 
 section "firewall snapshot (before)"
+# Tear down first. An earlier run interrupted between `up` and `down` leaves the
+# tort table installed, and snapshotting that as the baseline makes the
+# comparison meaningless - it reports the table's *removal* as tort having
+# changed the firewall.
+"$TORT" down >/dev/null 2>&1
 nft list ruleset > "$BEFORE" 2>/dev/null
-echo "$(wc -l < "$BEFORE") lines captured"
+echo "$(wc -l < "$BEFORE") lines captured (after a defensive teardown)"
 
 section "tort up"
 UP_OUT=$("$TORT" up 2>&1); UP_RC=$?
@@ -114,13 +119,15 @@ if [ -n "$(nft list table ip tort 2>/dev/null)" ]; then
     nft list table ip tort 2>/dev/null | grep -E "counter packets" | sed 's/^[[:space:]]*/  /'
 fi
 
-section "orphan check after the run"
-pgrep -af "/run/tort/torrc" && echo "ORPHANED tor still running" || echo "(none)"
-
 section "tort down"
 DOWN_OUT=$("$TORT" down 2>&1); DOWN_RC=$?
 echo "$DOWN_OUT"
 echo "exit code: $DOWN_RC"
+
+section "orphans after teardown"
+# Checked after `down`, not before: while the tunnel is up a running tor is
+# correct, and calling that an orphan reports a success as a failure.
+pgrep -af "/run/tort/torrc" && echo "ORPHANED tor survived teardown" || echo "(none - clean)"
 
 section "firewall comparison (counters normalised)"
 nft list ruleset > "$AFTER" 2>/dev/null
