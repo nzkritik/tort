@@ -97,7 +97,7 @@ table ip {table} {{
         veth = VETH_HOST,
         dns = DNS_PORT,
         trans = TRANS_PORT,
-        subnet = format!("{}/{}", HOST_ADDR, SUBNET_LEN),
+        subnet = SUBNET,
     )
 }
 
@@ -201,7 +201,7 @@ mod tests {
         // TCP to the gateway (the resolver's TCP/53 fallback) must not be
         // redirected into TransPort, or tor rejects it as a NAT loop.
         let r = rules_only();
-        let ret = r.find("ip daddr 10.66.0.1/24 return").expect("gateway RETURN present");
+        let ret = r.find(&format!("ip daddr {SUBNET} return")).expect("gateway RETURN present");
         let redir = r.find("meta l4proto tcp redirect").expect("tcp redirect present");
         assert!(ret < redir, "the gateway RETURN must precede the TCP redirect");
     }

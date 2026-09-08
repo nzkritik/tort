@@ -16,6 +16,8 @@ pub const VETH_NS: &str = "tort-ns";
 pub const HOST_ADDR: &str = "10.66.0.1";
 pub const NS_ADDR: &str = "10.66.0.2";
 pub const SUBNET_LEN: u8 = 24;
+/// The subnet itself, in network form, for firewall matches.
+pub const SUBNET: &str = "10.66.0.0/24";
 
 /// tort's own tor ports, bound to the host side of the veth.
 pub const TRANS_PORT: u16 = 9140;
