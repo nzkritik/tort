@@ -53,6 +53,22 @@ pub fn create() -> Result<()> {
         bail!("network namespace '{NETNS}' already exists - run `tort down` first");
     }
 
+    // Namespace creation is eight separate `ip` invocations, so it is not
+    // atomic. If any step fails, undo the ones that succeeded rather than
+    // leaving a half-built namespace behind for the next run to trip over.
+    match create_inner() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = Command::new("ip").args(["netns", "delete", NETNS]).status();
+            // The host side of the veth outlives the namespace if the peer was
+            // never moved into it, so remove that explicitly too.
+            let _ = Command::new("ip").args(["link", "delete", VETH_HOST]).status();
+            Err(e.context("creating the network namespace (partial state rolled back)"))
+        }
+    }
+}
+
+fn create_inner() -> Result<()> {
     ip(&["netns", "add", NETNS])?;
 
     // Build the veth pair and move one end inside.
