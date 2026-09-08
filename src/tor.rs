@@ -133,6 +133,11 @@ pub fn start() -> Result<()> {
 
     fs::write(TORRC, torrc()).with_context(|| format!("writing {TORRC}"))?;
 
+    // Remove the previous run's log first. Bootstrap detection reads this file,
+    // and a stale "Bootstrapped 100%" from an earlier run would be taken as
+    // this run's success.
+    let _ = fs::remove_file(TOR_LOG);
+
     // Ownership is applied last so it covers everything just written, including
     // the config itself and anything a previous run left behind.
     if let Some(name) = tor_user() {
@@ -175,11 +180,22 @@ pub fn start() -> Result<()> {
     // the end-to-end check resolving a hostname from inside the namespace -
     // which is a stronger statement than "something is bound to that port".
     let deadline = Instant::now() + Duration::from_secs(30);
+    let mut listening = false;
     while Instant::now() < deadline {
         if tcp_port_open(TRANS_PORT) {
-            return Ok(());
+            listening = true;
+            break;
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+
+    if listening {
+        // Binding the port is not readiness. tor accepts connections on
+        // TransPort the moment it is bound, but cannot carry anything until it
+        // has fetched a consensus and built circuits - typically tens of
+        // seconds. Verifying before then tests a tor that has no circuits yet
+        // and fails for reasons that have nothing to do with the tunnel.
+        return wait_for_bootstrap(Duration::from_secs(120));
     }
 
     bail!(
@@ -189,12 +205,64 @@ pub fn start() -> Result<()> {
     )
 }
 
+/// Wait until tor reports a fully bootstrapped connection to the network.
+///
+/// Progress is echoed as it changes, because this legitimately takes tens of
+/// seconds and silence is indistinguishable from a hang.
+pub fn wait_for_bootstrap(timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut last_shown = String::new();
+
+    loop {
+        if let Ok(text) = fs::read_to_string(TOR_LOG) {
+            if text.contains("Bootstrapped 100%") {
+                println!("  tor bootstrapped");
+                return Ok(());
+            }
+
+            // Fail fast on a fatal error rather than waiting out the timeout.
+            if let Some(line) = text.lines().rev().find(|l| l.contains("[err]")) {
+                bail!("tor reported a fatal error while bootstrapping:\n  {}", line.trim());
+            }
+
+            if let Some(line) = text.lines().rev().find(|l| l.contains("Bootstrapped ")) {
+                let progress = line
+                    .split_once("Bootstrapped ")
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or_default()
+                    .to_string();
+                if progress != last_shown {
+                    println!("  tor: {progress}");
+                    last_shown = progress;
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            bail!(
+                "tor did not finish bootstrapping within {}s.\nLast lines of {TOR_LOG}:\n{}",
+                timeout.as_secs(),
+                log_tail()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// The last few lines of tor's log, for when the daemon dies after forking.
 fn log_tail() -> String {
     match fs::read_to_string(TOR_LOG) {
         Ok(text) => {
-            let lines: Vec<&str> = text.lines().collect();
-            let start = lines.len().saturating_sub(12);
+            // Drop raw stack frames. When tor crashes it prints a long
+            // backtrace, which pushes the actual error message out of view -
+            // the address lines are useless without tor's debug symbols anyway.
+            let lines: Vec<&str> = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("tor(+0x"))
+                .filter(|l| !l.contains(".so") || l.contains("["))
+                .filter(|l| !l.trim_start().starts_with("/usr/lib/"))
+                .collect();
+            let start = lines.len().saturating_sub(15);
             lines[start..].join("\n")
         }
         Err(e) => format!("(could not read {TOR_LOG}: {e})"),

@@ -64,11 +64,26 @@ else
     echo "--- listening on tort ports ---"
     ss -lntup 2>/dev/null | grep -E "10\.66\.0\.1|9140|9153|9150" || echo "(nothing bound)"
     echo "--- generated torrc ---";   cat /run/tort/torrc 2>/dev/null || echo "(none written)"
-    echo "--- tor log (the daemon's own account, post-fork) ---"
-    tail -20 /run/tort/tor.log 2>/dev/null || echo "(no tor log)"
+    echo "--- tor log: errors, warnings and bootstrap progress ---"
+    # Filtered, not tailed. A tor crash prints a long backtrace of raw addresses
+    # which pushes the actual error out of view, and those frames are useless
+    # without tor's debug symbols.
+    grep -aE "\[err\]|\[warn\]|Bootstrapped" /run/tort/tor.log 2>/dev/null | tail -20 \
+        || echo "(no tor log)"
+    echo "--- did tor crash? ---"
+    grep -acE "^tor\(\+0x" /run/tort/tor.log 2>/dev/null | \
+        xargs -I{} sh -c '[ {} -gt 0 ] && echo "YES - {} backtrace frames present" || echo "no backtrace"' 
     echo "--- tor --verify-config ---"
     tor -f /run/tort/torrc --verify-config 2>&1 | tail -8
     echo "--- tort nft table ---";    nft list table ip tort 2>&1 | head -30
+fi
+
+if [ $UP_RC -ne 0 ] && [ -e /var/run/netns/tort ]; then
+    section "namespace connectivity (up failed but the namespace survived)"
+    ip netns exec tort ip route 2>&1 | head -3
+    echo "--- can the namespace reach tor's TransPort? ---"
+    ip netns exec tort timeout 5 bash -c "</dev/tcp/10.66.0.1/9140" 2>&1 \
+        && echo "reachable" || echo "NOT reachable"
 fi
 
 section "tort down"
