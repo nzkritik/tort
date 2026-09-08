@@ -121,14 +121,21 @@ pub fn start() -> Result<()> {
     }
 
     fs::create_dir_all(RUN_DIR).with_context(|| format!("creating {RUN_DIR}"))?;
+    fs::create_dir_all(TOR_RUN_DIR).with_context(|| format!("creating {TOR_RUN_DIR}"))?;
     fs::create_dir_all(DATA_DIR).with_context(|| format!("creating {DATA_DIR}"))?;
 
-    // tor drops to an unprivileged account and only then opens its log, so the
+    // tor drops to an unprivileged account and only then opens its log, so its
     // runtime directory must belong to that account or the open fails with
-    // EACCES. Both directories are 0700: the log and the tor state describe the
-    // user's network activity and are nobody else's business.
-    fs::set_permissions(RUN_DIR, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("tightening permissions on {RUN_DIR}"))?;
+    // EACCES. It is 0700: the log and tor's state describe the user's network
+    // activity and are nobody else's business.
+    //
+    // Only TOR_RUN_DIR is tightened, never RUN_DIR. The daemon's socket sits in
+    // RUN_DIR, and making that 0700 and tor-owned locks every unprivileged
+    // client out of the socket - the tunnel comes up and the CLI then reports
+    // the daemon as missing, which is a confusing way to say "you may no longer
+    // traverse this directory".
+    fs::set_permissions(TOR_RUN_DIR, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("tightening permissions on {TOR_RUN_DIR}"))?;
     // Tor refuses to start if its DataDirectory is group- or world-accessible.
     fs::set_permissions(DATA_DIR, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("tightening permissions on {DATA_DIR}"))?;
@@ -144,10 +151,10 @@ pub fn start() -> Result<()> {
     // the config itself and anything a previous run left behind.
     if let Some(name) = tor_user() {
         if let Ok(Some(u)) = nix::unistd::User::from_name(&name) {
-            // The runtime directory, so tor can create its own log and pidfile
-            // there after dropping privileges.
-            chown_tree(Path::new(RUN_DIR), u.uid, u.gid)
-                .with_context(|| format!("giving {RUN_DIR} to the '{name}' account"))?;
+            // tor's runtime subdirectory, so it can create its own log and
+            // pidfile there after dropping privileges. Never RUN_DIR itself.
+            chown_tree(Path::new(TOR_RUN_DIR), u.uid, u.gid)
+                .with_context(|| format!("giving {TOR_RUN_DIR} to the '{name}' account"))?;
             // Recursive, not just the top directory. An earlier tort that ran
             // tor as root leaves root-owned subdirectories (keys/, state,
             // cached-*) behind, and tor cannot read them once it drops

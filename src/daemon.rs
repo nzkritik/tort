@@ -34,8 +34,26 @@ pub fn serve() -> Result<()> {
     }
 
     std::fs::create_dir_all(crate::config::RUN_DIR)?;
+    // Traversable by everyone: unprivileged clients have to reach the socket
+    // inside. tor's own files live a level down, in a directory it owns.
+    std::fs::set_permissions(
+        crate::config::RUN_DIR,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )?;
+
     // A stale socket from a previous run would make bind() fail.
     let _ = std::fs::remove_file(SOCKET_PATH);
+
+    // tor runs as a child of this daemon, so a restart kills it while the
+    // namespace and nftables rules survive. That leaves traffic redirected at a
+    // port nothing is listening on - fail-closed, but a confusing state to hand
+    // a user. Start from a clean slate instead of inheriting half a tunnel.
+    if (netns::exists() || nft::is_installed()) && !DirectRoot.is_up() {
+        eprintln!("tortd: found a partial tunnel from a previous daemon; cleaning up");
+        if let Err(e) = DirectRoot.down() {
+            eprintln!("tortd: could not clean up leftover state: {e:#}");
+        }
+    }
 
     let listener = UnixListener::bind(SOCKET_PATH)
         .with_context(|| format!("binding {SOCKET_PATH}"))?;
