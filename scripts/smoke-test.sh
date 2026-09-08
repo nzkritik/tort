@@ -67,12 +67,32 @@ else
     echo "--- listening on tort ports ---"
     ss -lntup 2>/dev/null | grep -E "10\.66\.0\.1|9140|9153|9150" || echo "(nothing bound)"
     echo "--- generated torrc ---";   cat /run/tort/torrc 2>/dev/null || echo "(none written)"
+    echo "--- can the HOST reach the Tor network at all? ---"
+    # If this fails, nothing tort does can help: tor cannot bootstrap without
+    # reaching a directory authority. moria1 and tor26, on their DirPorts.
+    for da in 128.31.0.39:9131 86.59.21.38:80; do
+        timeout 5 bash -c "</dev/tcp/${da%%:*}/${da##*:}" 2>/dev/null \
+            && echo "  $da reachable" || echo "  $da NOT reachable"
+    done
+
+    echo "--- outbound firewall policy (ufw) ---"
+    ufw status verbose 2>/dev/null | head -8 || echo "(ufw not present)"
+
+    echo "--- system tor, for comparison ---"
+    systemctl is-active tor 2>/dev/null || echo "(system tor not active)"
+
     echo "--- tor log: errors, warnings and bootstrap progress ---"
     # Filtered, not tailed. A tor crash prints a long backtrace of raw addresses
     # which pushes the actual error out of view, and those frames are useless
     # without tor's debug symbols.
     grep -aE "\[err\]|\[warn\]|Bootstrapped" /run/tort/tor.log 2>/dev/null | tail -20 \
         || echo "(no tor log)"
+    echo "--- full tor log, address frames removed ---"
+    # The filtered view above can miss a crash banner, which is not tagged
+    # [err] or [warn]. Strip only the raw address frames and show the rest.
+    grep -avE "^(tor\(\+0x|/usr/lib/)" /run/tort/tor.log 2>/dev/null | tail -25 \
+        || echo "(no tor log)"
+
     echo "--- did tor crash? ---"
     grep -acE "^tor\(\+0x" /run/tort/tor.log 2>/dev/null | \
         xargs -I{} sh -c '[ {} -gt 0 ] && echo "YES - {} backtrace frames present" || echo "no backtrace"' 

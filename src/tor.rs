@@ -78,21 +78,17 @@ pub fn is_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// Is a **TCP** port accepting connections on the host side of the veth?
+/// Is tort's tor instance running?
 ///
-/// Only meaningful for TransPort and SocksPort. tor's DNSPort listens on UDP,
-/// so probing it with a TCP connect always fails no matter how healthy tor is -
-/// which is precisely the bug that made startup look like a tor problem.
-pub fn tcp_port_open(port: u16) -> bool {
-    TcpStream::connect_timeout(
-        &format!("{HOST_ADDR}:{port}").parse().expect("valid address"),
-        Duration::from_millis(300),
-    )
-    .is_ok()
-}
-
+/// Determined from the process list rather than by connecting to TransPort.
+/// Probing that port is not free: tor accepts the connection, asks the kernel
+/// for the original destination via SO_ORIGINAL_DST, gets the veth address
+/// because nothing NAT-redirected it, and logs "Rejecting request for anonymous
+/// connection to private address ... Possible loop in your NAT rules?". That
+/// warning is entirely self-inflicted and sent several debugging sessions in
+/// the wrong direction.
 pub fn is_running() -> bool {
-    tcp_port_open(TRANS_PORT)
+    !our_tor_processes().is_empty()
 }
 
 /// Recursively set ownership, without ever following a symlink.
@@ -179,35 +175,16 @@ pub fn start() -> Result<()> {
     }
 
     // RunAsDaemon means the process we just ran forked and exited, so its exit
-    // status says nothing about whether the daemon survived. Wait for the port
-    // to actually serve instead of trusting the exit code.
-    //
-    // Only TransPort is probed. DNSPort is a UDP listener, and a TCP connect to
-    // it fails whatever tor is doing; DNS is verified functionally instead, by
-    // the end-to-end check resolving a hostname from inside the namespace -
-    // which is a stronger statement than "something is bound to that port".
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut listening = false;
-    while Instant::now() < deadline {
-        if tcp_port_open(TRANS_PORT) {
-            listening = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
-    if listening {
-        // Binding the port is not readiness. tor accepts connections on
-        // TransPort the moment it is bound, but cannot carry anything until it
-        // has fetched a consensus and built circuits - typically tens of
-        // seconds. Verifying before then tests a tor that has no circuits yet
-        // and fails for reasons that have nothing to do with the tunnel.
+    // status says nothing about whether the daemon survived. Readiness is taken
+    // from tor's own log rather than by probing TransPort: binding a port is
+    // not readiness (tor cannot carry traffic until it has a consensus and
+    // circuits), and probing it makes tor log a spurious NAT-loop warning.
+    if is_running() {
         return wait_for_bootstrap(Duration::from_secs(120));
     }
 
     bail!(
-        "tor started but its TransPort never began accepting connections.\n\
-         Last lines of {TOR_LOG}:\n{}",
+        "tor exited immediately after starting.\nLast lines of {TOR_LOG}:\n{}",
         log_tail()
     )
 }
@@ -245,10 +222,22 @@ pub fn wait_for_bootstrap(timeout: Duration) -> Result<()> {
             }
         }
 
+        // A daemon that has died will never make progress, so stop waiting on
+        // it. Without this the wait burns its whole budget and then reports a
+        // timeout, which describes the symptom rather than the cause.
+        if !is_running() {
+            bail!(
+                "the tor daemon exited while bootstrapping.\nLast lines of {TOR_LOG}:\n{}",
+                log_tail()
+            );
+        }
+
         if Instant::now() >= deadline {
             bail!(
-                "tor did not finish bootstrapping within {}s.\nLast lines of {TOR_LOG}:\n{}",
+                "tor did not finish bootstrapping within {}s (reached {}).\n\
+                 Last lines of {TOR_LOG}:\n{}",
                 timeout.as_secs(),
+                if last_shown.is_empty() { "no progress at all" } else { &last_shown },
                 log_tail()
             );
         }
