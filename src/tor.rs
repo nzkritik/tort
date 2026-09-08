@@ -42,7 +42,7 @@ pub fn torrc() -> String {
          # Bound to the host side of the veth so the namespace can reach them.\n\
          TransPort {host}:{trans}\n\
          DNSPort {host}:{dns}\n\
-         SocksPort {host}:{socks}\n\
+         SocksPort 127.0.0.1:{socks}\n\
          \n\
          # Required for .onion resolution through the transparent proxy.\n\
          AutomapHostsOnResolve 1\n\
@@ -89,6 +89,27 @@ pub fn is_running() -> bool {
     port_open(TRANS_PORT)
 }
 
+/// Recursively set ownership, without ever following a symlink.
+///
+/// AT_SYMLINK_NOFOLLOW matters: this runs as root over a directory that a less
+/// privileged account owns, so a symlink planted inside it must not be able to
+/// redirect the chown at something outside the tree.
+fn chown_tree(path: &Path, uid: nix::unistd::Uid, gid: nix::unistd::Gid) -> Result<()> {
+    use nix::fcntl::AtFlags;
+    use nix::unistd::fchownat;
+
+    fchownat(None, path, Some(uid), Some(gid), AtFlags::AT_SYMLINK_NOFOLLOW)
+        .with_context(|| format!("chown {}", path.display()))?;
+
+    let meta = fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        for entry in fs::read_dir(path)? {
+            chown_tree(&entry?.path(), uid, gid)?;
+        }
+    }
+    Ok(())
+}
+
 /// Write the config and start tor, waiting until it is actually serving.
 pub fn start() -> Result<()> {
     fs::create_dir_all(RUN_DIR).with_context(|| format!("creating {RUN_DIR}"))?;
@@ -101,7 +122,11 @@ pub fn start() -> Result<()> {
     // DataDirectory or it will refuse to start.
     if let Some(name) = tor_user() {
         if let Ok(Some(u)) = nix::unistd::User::from_name(&name) {
-            nix::unistd::chown(DATA_DIR, Some(u.uid), Some(u.gid))
+            // Recursive, not just the top directory. An earlier tort that ran
+            // tor as root leaves root-owned subdirectories (keys/, state,
+            // cached-*) behind, and tor cannot read them once it drops
+            // privileges - which is exactly how this surfaced.
+            chown_tree(Path::new(DATA_DIR), u.uid, u.gid)
                 .with_context(|| format!("giving {DATA_DIR} to the '{name}' account"))?;
         }
     }
@@ -177,6 +202,16 @@ mod tests {
         let c = torrc();
         assert!(c.contains("AutomapHostsOnResolve 1"));
         assert!(c.contains("VirtualAddrNetworkIPv4"));
+    }
+
+    #[test]
+    fn socks_port_is_not_exposed_on_the_veth() {
+        // Binding SOCKS on the veth address would expose it to anything that
+        // can route to 10.66.0.0/24, and it serves no purpose there: prerouting
+        // redirects all TCP from the namespace to TransPort before it could
+        // reach the SOCKS port anyway.
+        assert!(torrc().contains("SocksPort 127.0.0.1:"));
+        assert!(!torrc().contains(&format!("SocksPort {HOST_ADDR}")));
     }
 
     #[test]

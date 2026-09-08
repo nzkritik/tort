@@ -61,6 +61,15 @@ table ip {table} {{
     chain input {{
         type filter hook input priority filter; policy accept;
 
+        # tor's ports are bound to the veth address so the namespace can reach
+        # them - and tor warns, correctly, that this "allows everybody on your
+        # local network to use your machine as a proxy". Under Linux's weak host
+        # model an address on one interface is reachable via any interface, so a
+        # LAN host with a route to this subnet could otherwise use tort as an
+        # open proxy. Only the namespace may reach these ports.
+        iifname != "{veth}" tcp dport {trans} drop
+        iifname != "{veth}" udp dport {dns} drop
+
         iifname "{veth}" ct state established,related accept
         iifname "{veth}" tcp dport {trans} accept
         iifname "{veth}" udp dport {dns} accept
@@ -160,6 +169,13 @@ mod tests {
             !rules_only.contains("policy drop"),
             "a drop policy here would affect traffic that has nothing to do with tort"
         );
+    }
+
+    #[test]
+    fn tor_ports_are_unreachable_from_outside_the_namespace() {
+        let r = ruleset();
+        assert!(r.contains(&format!("iifname != \"{VETH_HOST}\" tcp dport {TRANS_PORT} drop")));
+        assert!(r.contains(&format!("iifname != \"{VETH_HOST}\" udp dport {DNS_PORT} drop")));
     }
 
     #[test]
