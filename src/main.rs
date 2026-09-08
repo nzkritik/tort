@@ -21,6 +21,7 @@ use clap::{Parser, Subcommand};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{execvp, fork, ForkResult, Gid, Uid};
 use std::ffi::CString;
+use std::path::Path;
 
 use config::*;
 use privileged::{DirectRoot, Privileged};
@@ -51,6 +52,8 @@ enum Commands {
     Shell,
     /// Verify from inside the namespace that traffic really exits via Tor.
     Verify,
+    /// Fetch a known onion service, testing .onion resolution and routing.
+    Onion,
     /// Print the nftables ruleset without applying it.
     Ruleset,
 }
@@ -77,6 +80,10 @@ fn main() -> Result<()> {
             require_root("verify")?;
             report_verdict(verify_in_namespace()?);
             Ok(())
+        }
+        Commands::Onion => {
+            require_root("onion")?;
+            cmd_onion()
         }
         Commands::Run { argv } => {
             require_root("run")?;
@@ -276,11 +283,146 @@ fn verify_in_namespace() -> Result<Verdict> {
     }
 }
 
+/// Test .onion resolution and routing from inside the namespace.
+///
+/// This exercises a path ordinary traffic does not: tor's DNSPort returns a
+/// virtual address from VirtualAddrNetworkIPv4 (10.192.0.0/10), and the
+/// redirect must carry a connection to that address into TransPort. It is also
+/// why the gateway exclusion in the ruleset is a /24 and not 10.0.0.0/8 - the
+/// wider range would swallow the virtual network and break exactly this.
+fn cmd_onion() -> Result<()> {
+    if !DirectRoot.is_up() {
+        bail!("tort is not up - run `sudo tort up` first");
+    }
+
+    println!("Fetching {} ...", verify::TOR_PROJECT_ONION);
+
+    match unsafe { fork() }.context("fork for the onion check")? {
+        ForkResult::Child => {
+            let code = match netns::enter_with_resolver() {
+                Err(_) => 2,
+                Ok(()) => match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Err(_) => 2,
+                    Ok(rt) => match rt.block_on(verify::check_onion()) {
+                        Ok(status) if (200..400).contains(&status) => 0,
+                        Ok(status) => {
+                            eprintln!("  onion service replied with HTTP {status}");
+                            1
+                        }
+                        Err(e) => {
+                            eprintln!("  {e:#}");
+                            2
+                        }
+                    },
+                },
+            };
+            std::process::exit(code);
+        }
+        ForkResult::Parent { child } => match waitpid(child, None).context("waiting for onion check")? {
+            WaitStatus::Exited(_, 0) => {
+                println!("  onion service reachable - .onion resolution and routing work");
+                Ok(())
+            }
+            WaitStatus::Exited(_, 1) => bail!("the onion service answered, but not with success"),
+            _ => bail!("could not reach the onion service"),
+        },
+    }
+}
+
+/// Browsers that hand a new invocation off to an already-running instance.
+const HANDOFF_BROWSERS: &[&str] = &[
+    "brave", "chrome", "chromium", "firefox", "librewolf", "vivaldi", "opera", "msedge",
+];
+
+/// Refuse to launch a browser that would silently open a tab somewhere else.
+///
+/// Every major browser, started a second time with the same profile, does not
+/// start a second browser: it signals the running instance to open a tab and
+/// exits. That instance is outside the namespace. The page would load, the user
+/// would assume it was tunnelled, and it would not be - traffic leaving through
+/// the host's normal route while tort reports success.
+///
+/// This is the most dangerous thing tort could get wrong, so it fails closed
+/// rather than warning.
+fn browser_safety_check(argv: &[String]) -> Result<()> {
+    let prog = Path::new(&argv[0])
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&argv[0])
+        .to_lowercase();
+
+    let Some(browser) = HANDOFF_BROWSERS.iter().find(|b| prog.contains(*b)) else {
+        return Ok(());
+    };
+
+    let isolated = argv.iter().any(|a| {
+        a.starts_with("--user-data-dir") || a.starts_with("--profile") || a == "-P"
+    });
+    if isolated {
+        return Ok(());
+    }
+
+    // Is an instance already running outside the namespace?
+    let running = std::process::Command::new("pgrep")
+        .args(["-x", browser])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if running {
+        bail!(
+            "{browser} is already running outside the tunnel.\n\
+             \n\
+             Launching it again would not start a browser inside the namespace: it would\n\
+             signal the running instance to open a tab, and that instance is NOT tunnelled.\n\
+             The page would load and you would have no indication the traffic went in the\n\
+             clear.\n\
+             \n\
+             Either close {browser} first, or give this instance its own profile:\n\
+             \n\
+               sudo -E tort run {browser} --user-data-dir=/tmp/tort-{browser}\n"
+        );
+    }
+
+    eprintln!(
+        "tort: note - if {browser} is started outside the tunnel later, it may take over\n\
+         this profile. Consider --user-data-dir=/tmp/tort-{browser} for isolation.\n"
+    );
+    Ok(())
+}
+
+/// Reconstruct the session environment sudo strips, so GUI apps can start.
+fn restore_session_env(uid: u32) {
+    // sudo's env_reset drops DISPLAY and WAYLAND_DISPLAY. XDG_RUNTIME_DIR is
+    // derivable from the uid; the display variables are not, so they can only be
+    // preserved by the caller using `sudo -E`.
+    let runtime_dir = format!("/run/user/{uid}");
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() && Path::new(&runtime_dir).exists() {
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+    }
+
+    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+        let bus = format!("{runtime_dir}/bus");
+        if Path::new(&bus).exists() {
+            std::env::set_var("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={bus}"));
+        }
+    }
+
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        eprintln!(
+            "tort: no DISPLAY or WAYLAND_DISPLAY - a graphical application will not start.\n\
+             sudo strips them; re-run as:  sudo -E tort run ...\n"
+        );
+    }
+}
+
 /// Run a command inside the namespace as the invoking (non-root) user.
 fn cmd_run(argv: &[String]) -> Result<()> {
     if !DirectRoot.is_up() {
         bail!("tort is not up - run `sudo tort up` first");
     }
+
+    browser_safety_check(argv)?;
 
     match unsafe { fork() }.context("fork to run the command")? {
         ForkResult::Child => {
@@ -347,6 +489,7 @@ fn drop_privileges() -> Result<()> {
 
     std::env::set_var("HOME", home_of(uid));
     std::env::set_var("USER", std::env::var("SUDO_USER").unwrap_or_default());
+    restore_session_env(uid);
     Ok(())
 }
 

@@ -55,6 +55,7 @@ echo "$UP_OUT"
 echo "exit code: $UP_RC"
 
 TRAFFIC_RESULT="not attempted"
+ONION_RESULT="not attempted"
 if [ $UP_RC -eq 0 ]; then
     section "traffic test from inside the namespace"
     TRAFFIC_OUT=$("$TORT" run curl -sS --max-time 45 https://check.torproject.org/api/ip 2>&1)
@@ -63,6 +64,11 @@ if [ $UP_RC -eq 0 ]; then
 
     section "DNS resolution inside the namespace"
     "$TORT" run getent hosts example.com || echo "(getent failed)"
+
+    section "onion service"
+    ONION_OUT=$("$TORT" onion 2>&1); ONION_RC=$?
+    echo "$ONION_OUT"
+    if [ $ONION_RC -eq 0 ]; then ONION_RESULT="reachable"; else ONION_RESULT="FAILED"; fi
 else
     section "DIAGNOSTICS (tort up failed)"
     echo "--- namespaces ---";        ip netns list 2>&1 | head
@@ -144,6 +150,7 @@ section "SUMMARY"
 if [ $UP_RC -eq 0 ]; then
     echo "tort up      : OK"
     echo "traffic test : $TRAFFIC_RESULT"
+    echo "onion test   : $ONION_RESULT"
 else
     echo "tort up      : FAILED (exit $UP_RC)"
     echo "reason       : $(echo "$UP_OUT" | grep -iE 'error|failed|refus' | head -3)"

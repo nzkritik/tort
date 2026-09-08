@@ -107,6 +107,51 @@ means traffic never reached the rule at all, which is a different problem from a
 non-zero counter with no connectivity - that means something downstream dropped
 it.
 
+## Running a browser
+
+```bash
+sudo -E tort run brave --user-data-dir=/tmp/tort-brave
+```
+
+Both parts of that line matter.
+
+**`sudo -E`** — sudo's `env_reset` strips `DISPLAY` and `WAYLAND_DISPLAY`, and
+without them a graphical application cannot start at all. tort reconstructs
+`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` from the invoking uid, but the
+display variables cannot be derived - only preserved.
+
+**`--user-data-dir`** — this is a safety measure, not a preference. Every major
+browser, started a second time against the same profile, does not start a second
+browser: it signals the running instance to open a tab and exits. That instance
+is outside the namespace. The page loads, and nothing indicates the traffic went
+in the clear.
+
+tort refuses to launch a browser it detects already running without an isolated
+profile, rather than warning. Getting this wrong looks exactly like success.
+
+Two further notes for Chromium-based browsers:
+
+- **QUIC will fail and fall back to TCP.** tort drops UDP, since tor cannot
+  carry it. This is correct - a leak becomes a failure - but the first
+  connection to each host may pause. `--disable-quic` avoids the wait.
+- **WebRTC cannot leak your address**, because the UDP it needs is dropped. It
+  will simply not work.
+
+## Onion services
+
+```bash
+sudo tort onion
+```
+
+Fetches the Tor Project's own onion service from inside the namespace. This
+exercises a different path from ordinary traffic: tor's `DNSPort` returns a
+virtual address from `VirtualAddrNetworkIPv4` (`10.192.0.0/10`), and the
+redirect must carry a connection to that address into `TransPort`.
+
+It is also why the gateway exclusion in the ruleset is a `/24` rather than
+`10.0.0.0/8` - the wider range would swallow the virtual network and break onion
+routing while leaving ordinary browsing working, which is a bad way to find out.
+
 ## Coexisting with a host firewall
 
 tort installs its own nftables table and never edits anyone else's rules. That

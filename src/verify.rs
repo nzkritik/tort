@@ -65,6 +65,37 @@ async fn query() -> Result<Option<bool>> {
     Ok(body.get("IsTor").and_then(|v| v.as_bool()))
 }
 
+/// The Tor Project's own onion service. Used to test that .onion addresses
+/// resolve and route, which exercises a different path from ordinary traffic:
+/// tor's DNSPort hands back a virtual address from VirtualAddrNetworkIPv4, and
+/// the redirect must carry a connection to that address into TransPort.
+pub const TOR_PROJECT_ONION: &str =
+    "http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/";
+
+/// Fetch an onion service from inside the namespace.
+///
+/// Must be called with the current thread already in the namespace. Returns the
+/// HTTP status on success. A failure here with ordinary traffic working means
+/// the automap/virtual-address path is broken rather than the tunnel.
+pub async fn check_onion() -> Result<u16> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        // Onion services are slower to reach than ordinary sites: the circuit is
+        // longer and there is a rendezvous to negotiate.
+        .timeout(Duration::from_secs(60))
+        .build()
+        .context("building the onion client")?;
+
+    let response = client
+        .get(TOR_PROJECT_ONION)
+        .send()
+        .await
+        .context("reaching the Tor Project onion service")?;
+
+    Ok(response.status().as_u16())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
