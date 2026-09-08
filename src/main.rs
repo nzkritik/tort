@@ -392,11 +392,16 @@ fn browser_safety_check(argv: &[String]) -> Result<()> {
 }
 
 /// Reconstruct the session environment sudo strips, so GUI apps can start.
+///
+/// sudo's env_reset drops DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR and the
+/// D-Bus address, and without them a graphical application exits immediately.
+/// Requiring `sudo -E` would work, but it is a flag people forget, and the
+/// failure it causes ("Failed to connect to Wayland display") looks like a tort
+/// bug rather than a missing variable. Every one of these can be discovered
+/// from the invoking uid, so tort discovers them.
 fn restore_session_env(uid: u32) {
-    // sudo's env_reset drops DISPLAY and WAYLAND_DISPLAY. XDG_RUNTIME_DIR is
-    // derivable from the uid; the display variables are not, so they can only be
-    // preserved by the caller using `sudo -E`.
     let runtime_dir = format!("/run/user/{uid}");
+
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() && Path::new(&runtime_dir).exists() {
         std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
     }
@@ -408,12 +413,53 @@ fn restore_session_env(uid: u32) {
         }
     }
 
+    // The Wayland display is just the name of a socket in the runtime dir.
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        if let Some(display) = find_wayland_socket(&runtime_dir) {
+            std::env::set_var("WAYLAND_DISPLAY", display);
+        }
+    }
+
+    // Likewise X11: /tmp/.X11-unix/X<n> means DISPLAY=":<n>".
+    if std::env::var_os("DISPLAY").is_none() {
+        if let Some(display) = find_x11_display() {
+            std::env::set_var("DISPLAY", display);
+        }
+    }
+
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         eprintln!(
-            "tort: no DISPLAY or WAYLAND_DISPLAY - a graphical application will not start.\n\
-             sudo strips them; re-run as:  sudo -E tort run ...\n"
+            "tort: no display server found - a graphical application will not start.\n\
+             If you are on a remote session, try:  sudo -E tort run ...\n"
         );
     }
+}
+
+/// The first Wayland socket in the runtime directory, sorted so the choice is
+/// deterministic when a session has several.
+fn find_wayland_socket(runtime_dir: &str) -> Option<String> {
+    let mut names: Vec<String> = std::fs::read_dir(runtime_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("wayland-") && !n.ends_with(".lock"))
+        .collect();
+    names.sort();
+    names.into_iter().next()
+}
+
+/// The first X11 display socket. Sockets ending in "_" are the abstract-socket
+/// companions, not displays in their own right.
+fn find_x11_display() -> Option<String> {
+    let mut names: Vec<String> = std::fs::read_dir("/tmp/.X11-unix")
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| n.strip_prefix('X').map(str::to_string))
+        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    names.sort();
+    names.into_iter().next().map(|n| format!(":{n}"))
 }
 
 /// Run a command inside the namespace as the invoking (non-root) user.
