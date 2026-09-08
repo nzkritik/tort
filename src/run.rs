@@ -111,6 +111,16 @@ pub fn spawn_in_namespace(
                     std::env::set_var(k, v);
                 }
 
+                // HOME, USER and LOGNAME come from the passwd database rather
+                // than from the caller. The caller could say anything, and the
+                // daemon is about to run a process as this uid - it should use
+                // the system's idea of who that is, not the client's.
+                if let Some((home, name)) = passwd_entry(uid) {
+                    std::env::set_var("HOME", home);
+                    std::env::set_var("USER", &name);
+                    std::env::set_var("LOGNAME", &name);
+                }
+
                 drop_to_user(uid, gid)?;
 
                 let prog = CString::new(argv[0].as_str())?;
@@ -135,6 +145,19 @@ pub fn spawn_in_namespace(
             }
         }
     }
+}
+
+/// The home directory and login name recorded for a uid.
+fn passwd_entry(uid: u32) -> Option<(String, String)> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 6 && fields.get(2) == Some(&uid.to_string().as_str()) {
+            Some((fields[5].to_string(), fields[0].to_string()))
+        } else {
+            None
+        }
+    })
 }
 
 /// Drop to the calling user before exec.

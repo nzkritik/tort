@@ -23,6 +23,14 @@ echo "Installing systemd unit..."
 install -Dm644 "$REPO/packaging/tortd.service" /etc/systemd/system/tortd.service
 systemctl daemon-reload
 
+# Restart if it is already running, so an install always leaves the running
+# daemon matching the binary and unit just installed. Without this the installer
+# reports success while the old daemon keeps serving.
+if systemctl is-active --quiet tortd; then
+    echo "Restarting the running daemon..."
+    systemctl restart tortd
+fi
+
 echo
 echo "Installed. Start the daemon with:"
 echo "  sudo systemctl enable --now tortd"

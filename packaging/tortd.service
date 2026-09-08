@@ -16,8 +16,17 @@ StateDirectoryMode=0700
 # The daemon needs real privilege - it creates network namespaces, edits
 # nftables and changes uid - so most sandboxing would break it. What can be
 # given up safely is given up.
+#
+# ProtectHome is deliberately NOT set. It would hide /home, /root and
+# /run/user, and /run/user is where the Wayland and D-Bus sockets live. The
+# daemon's whole purpose for `run` is to hand a user their own session inside
+# the namespace, so hiding that session breaks it: a graphical application
+# fails with "Failed to connect to Wayland display: Permission denied", which
+# looks nothing like a sandboxing setting.
+#
+# PrivateTmp is likewise absent: browsers are launched with profile directories
+# under /tmp, and a private /tmp would silently give each run a different one.
 NoNewPrivileges=no
-ProtectHome=yes
 ProtectHostname=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
