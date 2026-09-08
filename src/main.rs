@@ -9,23 +9,27 @@
 //! Safety is a consequence of the topology rather than of a rule remembering to
 //! be there.
 
+mod client;
 mod config;
+mod daemon;
 mod netns;
 mod nft;
+mod polkit;
 mod privileged;
+mod proto;
+mod run;
 mod tor;
 mod verify;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{execvp, fork, ForkResult, Gid, Uid};
-use std::ffi::CString;
+use nix::unistd::Uid;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
-use config::*;
+use client::report;
 use privileged::{DirectRoot, Privileged};
-use verify::Verdict;
+use proto::{Request, Response};
 
 #[derive(Parser)]
 #[command(name = "tort", about = "Tor Tunnel - run applications inside a Tor-only network namespace")]
@@ -36,7 +40,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Create the namespace, start tor, and install the redirect rules.
+    /// Create the namespace, start tor, install the redirect rules, and verify.
     Up,
     /// Remove the rules, stop tor, and delete the namespace.
     Down,
@@ -44,7 +48,6 @@ enum Commands {
     Status,
     /// Run a command inside the Tor-only namespace.
     Run {
-        /// The command and its arguments.
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         argv: Vec<String>,
     },
@@ -56,109 +59,132 @@ enum Commands {
     Onion,
     /// Print the nftables ruleset without applying it.
     Ruleset,
+    /// Run the privileged daemon. Started by systemd, not by hand.
+    #[command(hide = true)]
+    Daemon,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        // Unprivileged: just prints generated text.
-        Commands::Ruleset => {
-            print!("{}", nft::ruleset());
-            Ok(())
-        }
-        Commands::Status => cmd_status(),
-        Commands::Up => {
-            require_root("up")?;
-            cmd_up()
-        }
-        Commands::Down => {
-            require_root("down")?;
-            cmd_down()
-        }
-        Commands::Verify => {
-            require_root("verify")?;
-            report_verdict(verify_in_namespace()?);
-            Ok(())
-        }
-        Commands::Onion => {
-            require_root("onion")?;
-            cmd_onion()
-        }
-        Commands::Run { argv } => {
-            require_root("run")?;
-            cmd_run(&argv)
-        }
-        Commands::Shell => {
-            require_root("shell")?;
-            let shell = invoking_user_shell();
-            cmd_run(&[shell])
-        }
-    }
-}
-
-/// setns and mount operations need CAP_SYS_ADMIN. Checking the effective uid is
-/// the right test here - unlike torc, which checked whether $SUDO_USER was set,
-/// an inherited environment variable that says nothing about privilege.
-fn require_root(what: &str) -> Result<()> {
-    if !Uid::effective().is_root() {
-        bail!("`tort {what}` needs root: run it with sudo");
-    }
-    Ok(())
-}
-
-fn cmd_up() -> Result<()> {
-    if DirectRoot.is_up() {
-        println!("tort is already up.");
+    // Unprivileged and needs no privilege.
+    if let Commands::Ruleset = cli.command {
+        print!("{}", nft::ruleset());
         return Ok(());
     }
 
-    println!("Creating namespace, starting tor, installing rules...");
-    DirectRoot.up()?;
-
-    println!("Verifying that traffic actually exits through Tor...");
-    let verdict = verify_in_namespace()?;
-    report_verdict(verdict);
-
-    // Fail closed. If we cannot prove the tunnel works, we do not leave it up
-    // for the user to trust. torc's equivalent path printed a success banner
-    // and carried on.
-    if !verdict.is_confirmed_safe() {
-        // Show which rules actually matched before tearing the table down. A
-        // redirect counter of zero means the packet never reached the rule; a
-        // non-zero counter with no connectivity means something downstream -
-        // another firewall on the same hook - dropped it afterwards.
-        eprintln!("\nRule counters at the point of failure:\n{}", nft::dump());
-
-        if firewall_may_be_interfering() {
-            eprintln!(
-                "A host firewall is active. tort's rules cannot override it: in netfilter a\n\
-                 DROP in any table wins, whatever another table accepted. Redirected traffic\n\
-                 arrives as a NEW inbound connection on {VETH_HOST}, which ufw denies by default.\n\
-                 \n\
-                 Allow it with:  sudo ufw allow in on {VETH_HOST}\n\
-                 \n\
-                 That is safe: tort's own input chain still restricts the namespace to tor's\n\
-                 two ports and drops everything else."
-            );
-        }
-
-        eprintln!("\nRefusing to leave a tunnel up that could not be verified. Tearing down.");
-        let _ = DirectRoot.down();
-        bail!("tort could not confirm traffic exits through Tor");
+    if let Commands::Daemon = cli.command {
+        return daemon::serve();
     }
 
-    println!("\ntort is up. Run applications with:  sudo tort run <command>");
-    Ok(())
+    let request = match &cli.command {
+        Commands::Up => Request::Up,
+        Commands::Down => Request::Down,
+        Commands::Status => Request::Status,
+        Commands::Verify => Request::Verify,
+        Commands::Onion => Request::Onion,
+        Commands::Run { argv } => {
+            browser_safety_check(argv)?;
+            Request::Run { argv: argv.clone(), env: client::session_env() }
+        }
+        Commands::Shell => Request::Run {
+            argv: vec![invoking_user_shell()],
+            env: client::session_env(),
+        },
+        Commands::Ruleset | Commands::Daemon => unreachable!("handled above"),
+    };
+
+    // Two ways to do the work. Through the daemon, polkit decides whether the
+    // caller may proceed and no sudo is involved. Running as root directly is
+    // kept for systems without the daemon installed, and for developing it.
+    let code = if daemon::is_available() {
+        via_daemon(request)?
+    } else if Uid::effective().is_root() {
+        locally(request)?
+    } else {
+        bail!(
+            "the tort daemon is not running, and this is not root.\n\
+             Start it with:  sudo systemctl start tortd\n\
+             or run this command under sudo."
+        );
+    };
+
+    std::process::exit(code);
+}
+
+/// Ask the daemon, lending it this process's terminal when running a command.
+fn via_daemon(request: Request) -> Result<i32> {
+    let stdio = match request {
+        Request::Run { .. } => Some([
+            std::io::stdin().as_raw_fd(),
+            std::io::stdout().as_raw_fd(),
+            std::io::stderr().as_raw_fd(),
+        ]),
+        _ => None,
+    };
+
+    let is_up = matches!(request, Request::Up);
+    let response = client::send(&request, stdio)?;
+
+    // The firewall hint is worth showing on a failed `up`, since a host
+    // firewall dropping the redirected traffic is the one failure tort cannot
+    // fix on the user's behalf.
+    if is_up {
+        if let Response::Failed { .. } = &response {
+            print_firewall_hint();
+        }
+    }
+
+    Ok(report(response))
+}
+
+/// Do the work in this process. Requires root.
+fn locally(request: Request) -> Result<i32> {
+    match request {
+        Request::Up => match DirectRoot.up_and_verify() {
+            Ok(output) => {
+                println!("{output}");
+                Ok(0)
+            }
+            Err(e) => {
+                eprintln!("tort: {e:#}");
+                print_firewall_hint();
+                Ok(1)
+            }
+        },
+        Request::Down => cmd_down().map(|_| 0),
+        Request::Status => {
+            cmd_status()?;
+            Ok(0)
+        }
+        Request::Verify => {
+            println!("  {}", verify::describe(run::verify_in_namespace()?));
+            Ok(0)
+        }
+        Request::Onion => {
+            if !DirectRoot.is_up() {
+                bail!("tort is not up - run `tort up` first");
+            }
+            println!("Fetching {} ...", verify::TOR_PROJECT_ONION);
+            println!("  {}", run::onion_in_namespace()?);
+            Ok(0)
+        }
+        Request::Run { argv, env } => {
+            if !DirectRoot.is_up() {
+                bail!("tort is not up - run `tort up` first");
+            }
+            let (uid, gid) = invoking_user();
+            run::spawn_in_namespace(&argv, uid, gid, &[], &env)
+        }
+    }
 }
 
 /// Tear down, reporting only what was actually there.
 ///
 /// The first version printed "the namespace, rules and tor instance are gone"
 /// unconditionally - including when nothing had been running, so it claimed to
-/// have done work it had not. That is the same unconditional-success reporting
-/// this project exists to avoid, so teardown now names what it removed and
-/// re-reads the kernel afterwards to confirm it really went.
+/// have done work it had not. Teardown now names what it removed and re-reads
+/// the kernel afterwards to confirm it really went.
 fn cmd_down() -> Result<()> {
     let before = (netns::exists(), nft::is_installed(), tor::is_running());
 
@@ -168,8 +194,6 @@ fn cmd_down() -> Result<()> {
     }
 
     let result = DirectRoot.down();
-
-    // Re-read from the kernel rather than trusting that down() succeeded.
     let after = (netns::exists(), nft::is_installed(), tor::is_running());
 
     for (label, was, still) in [
@@ -185,13 +209,52 @@ fn cmd_down() -> Result<()> {
     }
 
     result?;
-
     if after.0 || after.1 || after.2 {
         bail!("teardown did not fully succeed - see above");
     }
-
     println!("tort is down.");
     Ok(())
+}
+
+fn cmd_status() -> Result<()> {
+    let ns = netns::exists();
+    let rules = nft::is_installed();
+    let tor_up = tor::is_running();
+
+    println!("namespace      : {}", yes_no(ns));
+    println!("nftables table : {}", yes_no(rules));
+    println!("tor            : {}", yes_no(tor_up));
+
+    if ns && rules && tor_up {
+        println!("\ntort is up.");
+        println!("  {}", verify::describe(run::verify_in_namespace()?));
+    } else if !ns && !rules && !tor_up {
+        println!("\ntort is down.");
+    } else {
+        println!("\ntort is in a PARTIAL state. Run `tort down` to clean up.");
+    }
+    Ok(())
+}
+
+fn yes_no(b: bool) -> &'static str {
+    if b { "present" } else { "absent" }
+}
+
+fn print_firewall_hint() {
+    if !firewall_may_be_interfering() {
+        return;
+    }
+    eprintln!(
+        "\nA host firewall is active. tort's rules cannot override it: in netfilter a\n\
+         DROP in any table wins, whatever another table accepted. Redirected traffic\n\
+         arrives as a NEW inbound connection on {}, which ufw denies by default.\n\
+         \n\
+         Allow it with:  sudo ufw allow in on {}\n\
+         \n\
+         That is safe: tort's own input chain still restricts the namespace to tor's\n\
+         two ports and drops everything else.",
+        config::VETH_HOST, config::VETH_HOST
+    );
 }
 
 /// Is another firewall active that could be dropping tort's redirected traffic?
@@ -204,129 +267,6 @@ fn firewall_may_be_interfering() -> bool {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("Status: active"))
         .unwrap_or(false)
-}
-
-fn cmd_status() -> Result<()> {
-    let ns = netns::exists();
-    let rules = nft::is_installed();
-    let tor_up = tor::is_running();
-
-    println!("namespace {NETNS:>12}: {}", yes_no(ns));
-    println!("nftables table {NFT_TABLE:>7}: {}", yes_no(rules));
-    println!("tor TransPort {TRANS_PORT:>8}: {}", yes_no(tor_up));
-
-    if ns && rules && tor_up {
-        println!("\ntort is up.");
-        if Uid::effective().is_root() {
-            report_verdict(verify_in_namespace()?);
-        } else {
-            println!("Run `sudo tort verify` to confirm traffic exits through Tor.");
-        }
-    } else if !ns && !rules && !tor_up {
-        println!("\ntort is down.");
-    } else {
-        // Partial state is worth flagging rather than glossing over.
-        println!("\ntort is in a PARTIAL state. Run `sudo tort down` to clean up.");
-    }
-    Ok(())
-}
-
-fn yes_no(b: bool) -> &'static str {
-    if b { "present" } else { "absent" }
-}
-
-fn report_verdict(v: Verdict) {
-    match v {
-        Verdict::ThroughTor => println!("  confirmed: traffic from the namespace exits through Tor"),
-        Verdict::NotThroughTor => {
-            println!("  FAILED: check.torproject.org says this is NOT exiting through Tor")
-        }
-        Verdict::Unverified => {
-            println!("  UNVERIFIED: the check could not be completed - this is not a pass")
-        }
-    }
-}
-
-/// Run the verification inside the namespace, in a forked child.
-///
-/// Forking rather than entering the namespace in this process keeps the parent
-/// where it started, so `up` can continue and tear down on failure. The child
-/// is single-threaded at the moment it calls setns, and only afterwards builds
-/// a current-thread runtime - so every thread that could exist is already in
-/// the right namespace.
-fn verify_in_namespace() -> Result<Verdict> {
-    match unsafe { fork() }.context("fork for verification")? {
-        ForkResult::Child => {
-            let code = match netns::enter_with_resolver() {
-                Err(_) => 2,
-                Ok(()) => {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build();
-                    match rt {
-                        Err(_) => 2,
-                        Ok(rt) => match rt.block_on(verify::check()) {
-                            Verdict::ThroughTor => 0,
-                            Verdict::NotThroughTor => 1,
-                            Verdict::Unverified => 2,
-                        },
-                    }
-                }
-            };
-            std::process::exit(code);
-        }
-        ForkResult::Parent { child } => match waitpid(child, None).context("waiting for check")? {
-            WaitStatus::Exited(_, 0) => Ok(Verdict::ThroughTor),
-            WaitStatus::Exited(_, 1) => Ok(Verdict::NotThroughTor),
-            _ => Ok(Verdict::Unverified),
-        },
-    }
-}
-
-/// Test .onion resolution and routing from inside the namespace.
-///
-/// This exercises a path ordinary traffic does not: tor's DNSPort returns a
-/// virtual address from VirtualAddrNetworkIPv4 (10.192.0.0/10), and the
-/// redirect must carry a connection to that address into TransPort. It is also
-/// why the gateway exclusion in the ruleset is a /24 and not 10.0.0.0/8 - the
-/// wider range would swallow the virtual network and break exactly this.
-fn cmd_onion() -> Result<()> {
-    if !DirectRoot.is_up() {
-        bail!("tort is not up - run `sudo tort up` first");
-    }
-
-    println!("Fetching {} ...", verify::TOR_PROJECT_ONION);
-
-    match unsafe { fork() }.context("fork for the onion check")? {
-        ForkResult::Child => {
-            let code = match netns::enter_with_resolver() {
-                Err(_) => 2,
-                Ok(()) => match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                    Err(_) => 2,
-                    Ok(rt) => match rt.block_on(verify::check_onion()) {
-                        Ok(status) if (200..400).contains(&status) => 0,
-                        Ok(status) => {
-                            eprintln!("  onion service replied with HTTP {status}");
-                            1
-                        }
-                        Err(e) => {
-                            eprintln!("  {e:#}");
-                            2
-                        }
-                    },
-                },
-            };
-            std::process::exit(code);
-        }
-        ForkResult::Parent { child } => match waitpid(child, None).context("waiting for onion check")? {
-            WaitStatus::Exited(_, 0) => {
-                println!("  onion service reachable - .onion resolution and routing work");
-                Ok(())
-            }
-            WaitStatus::Exited(_, 1) => bail!("the onion service answered, but not with success"),
-            _ => bail!("could not reach the onion service"),
-        },
-    }
 }
 
 /// Browsers that hand a new invocation off to an already-running instance.
@@ -391,175 +331,22 @@ fn browser_safety_check(argv: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Reconstruct the session environment sudo strips, so GUI apps can start.
-///
-/// sudo's env_reset drops DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR and the
-/// D-Bus address, and without them a graphical application exits immediately.
-/// Requiring `sudo -E` would work, but it is a flag people forget, and the
-/// failure it causes ("Failed to connect to Wayland display") looks like a tort
-/// bug rather than a missing variable. Every one of these can be discovered
-/// from the invoking uid, so tort discovers them.
-fn restore_session_env(uid: u32) {
-    let runtime_dir = format!("/run/user/{uid}");
-
-    if std::env::var_os("XDG_RUNTIME_DIR").is_none() && Path::new(&runtime_dir).exists() {
-        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
-    }
-
-    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-        let bus = format!("{runtime_dir}/bus");
-        if Path::new(&bus).exists() {
-            std::env::set_var("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={bus}"));
-        }
-    }
-
-    // The Wayland display is just the name of a socket in the runtime dir.
-    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        if let Some(display) = find_wayland_socket(&runtime_dir) {
-            std::env::set_var("WAYLAND_DISPLAY", display);
-        }
-    }
-
-    // Likewise X11: /tmp/.X11-unix/X<n> means DISPLAY=":<n>".
-    if std::env::var_os("DISPLAY").is_none() {
-        if let Some(display) = find_x11_display() {
-            std::env::set_var("DISPLAY", display);
-        }
-    }
-
-    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        eprintln!(
-            "tort: no display server found - a graphical application will not start.\n\
-             If you are on a remote session, try:  sudo -E tort run ...\n"
-        );
-    }
-}
-
-/// The first Wayland socket in the runtime directory, sorted so the choice is
-/// deterministic when a session has several.
-fn find_wayland_socket(runtime_dir: &str) -> Option<String> {
-    let mut names: Vec<String> = std::fs::read_dir(runtime_dir)
-        .ok()?
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.starts_with("wayland-") && !n.ends_with(".lock"))
-        .collect();
-    names.sort();
-    names.into_iter().next()
-}
-
-/// The first X11 display socket. Sockets ending in "_" are the abstract-socket
-/// companions, not displays in their own right.
-fn find_x11_display() -> Option<String> {
-    let mut names: Vec<String> = std::fs::read_dir("/tmp/.X11-unix")
-        .ok()?
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter_map(|n| n.strip_prefix('X').map(str::to_string))
-        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-        .collect();
-    names.sort();
-    names.into_iter().next().map(|n| format!(":{n}"))
-}
-
-/// Run a command inside the namespace as the invoking (non-root) user.
-fn cmd_run(argv: &[String]) -> Result<()> {
-    if !DirectRoot.is_up() {
-        bail!("tort is not up - run `sudo tort up` first");
-    }
-
-    browser_safety_check(argv)?;
-
-    match unsafe { fork() }.context("fork to run the command")? {
-        ForkResult::Child => {
-            if let Err(e) = enter_and_exec(argv) {
-                eprintln!("tort: {e:#}");
-                std::process::exit(127);
-            }
-            unreachable!("execvp replaces the process");
-        }
-        ForkResult::Parent { child } => match waitpid(child, None).context("waiting for command")? {
-            WaitStatus::Exited(_, code) => std::process::exit(code),
-            WaitStatus::Signaled(_, sig, _) => bail!("command killed by signal {sig:?}"),
-            _ => Ok(()),
-        },
-    }
-}
-
-fn enter_and_exec(argv: &[String]) -> Result<()> {
-    netns::enter_with_resolver()?;
-
-    drop_privileges()?;
-
-    let prog = CString::new(argv[0].as_str()).context("command name")?;
-    let args: Vec<CString> = argv
-        .iter()
-        .map(|a| CString::new(a.as_str()).context("argument"))
-        .collect::<Result<_>>()?;
-
-    execvp(&prog, &args).with_context(|| format!("executing {}", argv[0]))?;
-    unreachable!()
-}
-
-/// Drop back to the user who invoked sudo.
-///
-/// A browser launched by `sudo tort run firefox` must not run as root. Note
-/// this is the *correct* use of $SUDO_UID - identifying who invoked us - as
-/// opposed to torc's use of $SUDO_USER as a stand-in for "are we privileged",
-/// which it is not.
-fn drop_privileges() -> Result<()> {
-    let (uid, gid) = match (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) {
-        (Ok(u), Ok(g)) => (
-            u.parse::<u32>().context("SUDO_UID was not a number")?,
-            g.parse::<u32>().context("SUDO_GID was not a number")?,
-        ),
+/// The uid and gid to run commands as when tort is invoked directly under sudo.
+fn invoking_user() -> (u32, u32) {
+    let uid = std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok());
+    let gid = std::env::var("SUDO_GID").ok().and_then(|g| g.parse().ok());
+    match (uid, gid) {
+        (Some(u), Some(g)) => (u, g),
         _ => {
             eprintln!("tort: warning - cannot determine the invoking user; running as root");
-            return Ok(());
+            (0, 0)
         }
-    };
-
-    if uid == 0 {
-        return Ok(());
     }
-
-    // Order matters: drop supplementary groups and the gid before the uid,
-    // because after setuid we no longer have the privilege to do either.
-    nix::unistd::setgroups(&[Gid::from_raw(gid)]).context("dropping supplementary groups")?;
-    nix::unistd::setgid(Gid::from_raw(gid)).context("dropping gid")?;
-    nix::unistd::setuid(Uid::from_raw(uid)).context("dropping uid")?;
-
-    if nix::unistd::setuid(Uid::from_raw(0)).is_ok() {
-        bail!("privileges were not actually dropped - refusing to continue");
-    }
-
-    std::env::set_var("HOME", home_of(uid));
-    std::env::set_var("USER", std::env::var("SUDO_USER").unwrap_or_default());
-    restore_session_env(uid);
-    Ok(())
-}
-
-fn home_of(uid: u32) -> String {
-    std::fs::read_to_string("/etc/passwd")
-        .ok()
-        .and_then(|p| {
-            p.lines()
-                .find(|l| l.split(':').nth(2) == Some(&uid.to_string()))
-                .and_then(|l| l.split(':').nth(5).map(str::to_string))
-        })
-        .unwrap_or_else(|| "/tmp".to_string())
 }
 
 fn invoking_user_shell() -> String {
-    std::env::var("SUDO_USER")
+    std::env::var("SHELL")
         .ok()
-        .and_then(|user| {
-            std::fs::read_to_string("/etc/passwd").ok().and_then(|p| {
-                p.lines()
-                    .find(|l| l.starts_with(&format!("{user}:")))
-                    .and_then(|l| l.split(':').nth(6).map(str::to_string))
-            })
-        })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/bin/sh".to_string())
 }

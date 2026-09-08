@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+
+  <vendor>tort</vendor>
+  <vendor_url>https://github.com/nzkritik/tort</vendor_url>
+
+  <!--
+    Two actions, deliberately. Bringing the tunnel up or down reconfigures the
+    host's firewall and starts a daemon, so it is administrative. Running a
+    command inside the namespace does not change system state, but it does get
+    a process into a namespace only root can enter, so it is not free either.
+
+    Both default to auth_admin_keep: authenticate as an administrator, and the
+    grant is remembered briefly so a session of work does not become a session
+    of password prompts.
+
+    Reading status needs no action at all - it changes nothing, and requiring a
+    password to ask "am I protected right now?" would discourage checking.
+  -->
+
+  <action id="io.github.nzkritik.tort.manage">
+    <description>Manage the Tor tunnel</description>
+    <message>Authentication is required to bring the Tor tunnel up or down</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.github.nzkritik.tort.run">
+    <description>Run a program inside the Tor tunnel</description>
+    <message>Authentication is required to run a program inside the Tor tunnel</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

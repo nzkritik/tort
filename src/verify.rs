@@ -31,6 +31,20 @@ impl Verdict {
     }
 }
 
+/// Wording for each verdict, kept in one place so the daemon and the local path
+/// cannot drift into describing the same result differently.
+pub fn describe(v: Verdict) -> &'static str {
+    match v {
+        Verdict::ThroughTor => "confirmed: traffic from the namespace exits through Tor",
+        Verdict::NotThroughTor => {
+            "FAILED: check.torproject.org says this is NOT exiting through Tor"
+        }
+        Verdict::Unverified => {
+            "UNVERIFIED: the check could not be completed - this is not a pass"
+        }
+    }
+}
+
 /// Ask the Tor Project whether this connection exits through Tor.
 ///
 /// Must be called with the current thread already inside the namespace.

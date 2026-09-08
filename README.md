@@ -42,16 +42,30 @@ Consequences worth spelling out:
 | Disrupting a system tor | tort runs its own instance, own config, own ports (9140/9150/9153). |
 | Stale state after a crash | State is read from the kernel, not from a file. |
 
+## Installing
+
+```bash
+sudo ./packaging/install.sh
+sudo systemctl enable --now tortd
+```
+
+This installs the binary, a polkit policy and a systemd unit. After it, tort is
+used **without sudo** — polkit decides whether you may proceed.
+
+Without the daemon every command still works when run as root directly, which is
+how the tool was developed and remains the fallback on systems without polkit.
+
 ## Usage
 
 ```bash
-sudo tort up                  # create namespace, start tor, install rules, verify
-sudo tort run firefox         # run one app inside the tunnel, as your user
-sudo tort shell               # interactive shell inside the tunnel
-sudo tort status              # what is actually running, read from the kernel
-sudo tort verify              # confirm traffic exits via Tor
-sudo tort down                # remove everything
-tort ruleset                  # print the nftables ruleset without applying it
+tort up                  # create namespace, start tor, install rules, verify
+tort run firefox         # run one app inside the tunnel, as your user
+tort shell               # interactive shell inside the tunnel
+tort status              # what is actually running, read from the kernel
+tort verify              # confirm traffic exits via Tor
+tort onion               # fetch a known onion service
+tort down                # remove everything
+tort ruleset             # print the nftables ruleset without applying it
 ```
 
 `tort up` verifies before returning, and **tears itself down if it cannot
@@ -86,11 +100,26 @@ transparent redirect demonstrably works, because nothing else could have carried
 the request. Three outcomes are kept distinct — confirmed, confirmed-not, and
 unverified — and unverified is never treated as a pass.
 
-**Privileged operations sit behind a trait.** Today there is one implementation
-that runs in-process under sudo. A socket-activated root daemon with a polkit
-policy can be added as a second implementation without touching the logic,
-turning the privilege boundary into four verbs rather than "may run arbitrary
+**The privilege boundary is six verbs, not a shell.** A root daemon holds every
+privileged operation; the CLI is an ordinary unprivileged process that can ask
+for `up`, `down`, `status`, `verify`, `onion` or `run` and nothing else. Compare
+running the whole tool under sudo, where the boundary is "may execute arbitrary
 commands as root".
+
+Three properties hold for every request:
+
+- The caller is identified by the kernel through `SO_PEERCRED`, never by
+  anything the caller says about itself.
+- Authorization is polkit's decision, taken before any work begins. The subject
+  is passed as `pid,start-time,uid` rather than a bare pid, so a caller that
+  exits immediately cannot have its pid reused by a more privileged process
+  before polkit looks at it.
+- A command runs as the calling user, on the caller's own terminal, which
+  arrives as passed file descriptors — the daemon never opens a terminal.
+
+Because the daemon is long-lived it also fixes by construction the bug torc had
+structurally: connect and disconnect are no longer separate processes with
+separate ideas of the current state.
 
 ## Verifying it works
 
@@ -111,7 +140,7 @@ it.
 ## Running a browser
 
 ```bash
-sudo tort run brave --user-data-dir=/tmp/tort-brave
+tort run brave --user-data-dir=/tmp/tort-brave
 ```
 
 sudo's `env_reset` strips `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and
@@ -142,7 +171,7 @@ Two further notes for Chromium-based browsers:
 ## Onion services
 
 ```bash
-sudo tort onion
+tort onion
 ```
 
 Fetches the Tor Project's own onion service from inside the namespace. Verified
@@ -167,7 +196,7 @@ ERR_BLOCKED_BY_CLIENT
 ```
 
 That is the browser refusing before a packet is sent, not a routing failure.
-`sudo tort onion` fetching the same address proves the tunnel carries it.
+`tort onion` fetching the same address proves the tunnel carries it.
 
 **Do not use Brave's built-in Tor window to work around this.** It starts
 Brave's own bundled tor, whose traffic would then be redirected into tort's tor
@@ -177,7 +206,7 @@ circuit for no benefit and is explicitly discouraged by the Tor Project.
 For `.onion` browsing inside tort, use Firefox with `.onion` resolution allowed:
 
 ```bash
-sudo tort run firefox --profile /tmp/tort-firefox
+tort run firefox --profile /tmp/tort-firefox
 ```
 
 then set `network.dns.blockDotOnion` to `false` in `about:config`. Firefox

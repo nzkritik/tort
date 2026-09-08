@@ -34,6 +34,8 @@ pub const NFT_TABLE: &str = "tort";
 pub const RUN_DIR: &str = "/run/tort";
 pub const DATA_DIR: &str = "/var/lib/tort";
 pub const TORRC: &str = "/run/tort/torrc";
+/// Where the privileged daemon listens.
+pub const SOCKET_PATH: &str = "/run/tort/tortd.sock";
 pub const TOR_PID: &str = "/run/tort/tor.pid";
 /// tor daemonises, so its own log is the only account of why it died.
 pub const TOR_LOG: &str = "/run/tort/tor.log";

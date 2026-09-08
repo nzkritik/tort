@@ -19,6 +19,43 @@ pub trait Privileged {
     fn is_up(&self) -> bool;
 }
 
+impl DirectRoot {
+    /// Bring the tunnel up and prove it works, or leave nothing behind.
+    ///
+    /// Verification is part of `up`, not a separate step a caller might skip.
+    /// A tunnel that cannot be shown to carry traffic through Tor is torn down
+    /// rather than left running: the whole point of the tool is that a failure
+    /// is visible instead of silently leaking.
+    pub fn up_and_verify(&self) -> Result<String> {
+        if self.is_up() {
+            return Ok("tort is already up.".into());
+        }
+
+        self.up()?;
+
+        let verdict = crate::run::verify_in_namespace()?;
+        if !verdict.is_confirmed_safe() {
+            // Show which rules matched before the table disappears. A redirect
+            // counter of zero means the packet never reached the rule; a
+            // non-zero counter with no connectivity means something downstream
+            // dropped it. Those need different fixes.
+            let counters = crate::nft::dump();
+            let _ = self.down();
+            bail!(
+                "{}\n\nRule counters at the point of failure:\n{}\n\
+                 Refusing to leave a tunnel up that could not be verified, so it was torn down.",
+                crate::verify::describe(verdict),
+                counters
+            );
+        }
+
+        Ok(format!(
+            "{}\n\ntort is up. Run applications with:  tort run <command>",
+            crate::verify::describe(verdict)
+        ))
+    }
+}
+
 pub struct DirectRoot;
 
 impl Privileged for DirectRoot {
