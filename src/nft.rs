@@ -34,7 +34,23 @@ table ip {table} {{
     chain prerouting {{
         type nat hook prerouting priority dstnat; policy accept;
 
+        # DNS over UDP goes to tor's resolver.
         iifname "{veth}" udp dport 53 redirect to :{dns}
+
+        # Nothing addressed to the gateway itself may enter tor. glibc's
+        # resolver falls back to TCP/53 when a UDP answer is truncated, and
+        # without this that connection is swept into the TransPort redirect
+        # below - tor then sees a request whose original destination is the
+        # private address 10.66.0.1 and rejects it with "Possible loop in your
+        # NAT rules?". tor's DNSPort is UDP-only, so there is nowhere for TCP/53
+        # to go; failing fast here is correct, and the input chain drops it.
+        #
+        # Note this range is deliberately narrow. A blanket RETURN for
+        # 10.0.0.0/8 would also cover tor's VirtualAddrNetworkIPv4
+        # (10.192.0.0/10), which is how .onion addresses are routed - excluding
+        # it would silently break onion services.
+        iifname "{veth}" ip daddr {subnet} return
+
         iifname "{veth}" meta l4proto tcp redirect to :{trans}
     }}
 
@@ -81,6 +97,7 @@ table ip {table} {{
         veth = VETH_HOST,
         dns = DNS_PORT,
         trans = TRANS_PORT,
+        subnet = format!("{}/{}", HOST_ADDR, SUBNET_LEN),
     )
 }
 
@@ -135,6 +152,19 @@ fn run_nft(script: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The ruleset with comments stripped.
+    ///
+    /// Assertions about what the firewall does must look at rules, not at the
+    /// prose explaining them - otherwise a comment mentioning a construct reads
+    /// as the construct being present.
+    fn rules_only() -> String {
+        ruleset()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn ruleset_is_an_atomic_replace() {
         let r = ruleset();
@@ -160,15 +190,27 @@ mod tests {
         // `policy drop` in tort's table would silently drop traffic belonging
         // to docker, libvirt or any VM on the host. Drops must always be
         // scoped to tort's own interface.
-        let rules_only: String = ruleset()
-            .lines()
-            .filter(|l| !l.trim_start().starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n");
         assert!(
-            !rules_only.contains("policy drop"),
+            !rules_only().contains("policy drop"),
             "a drop policy here would affect traffic that has nothing to do with tort"
         );
+    }
+
+    #[test]
+    fn gateway_traffic_never_enters_tor() {
+        // TCP to the gateway (the resolver's TCP/53 fallback) must not be
+        // redirected into TransPort, or tor rejects it as a NAT loop.
+        let r = rules_only();
+        let ret = r.find("ip daddr 10.66.0.1/24 return").expect("gateway RETURN present");
+        let redir = r.find("meta l4proto tcp redirect").expect("tcp redirect present");
+        assert!(ret < redir, "the gateway RETURN must precede the TCP redirect");
+    }
+
+    #[test]
+    fn onion_virtual_range_is_still_redirected() {
+        // A blanket 10.0.0.0/8 exclusion would swallow tor's
+        // VirtualAddrNetworkIPv4 and silently break .onion routing.
+        assert!(!rules_only().contains("10.0.0.0/8"));
     }
 
     #[test]

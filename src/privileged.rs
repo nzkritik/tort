@@ -39,6 +39,10 @@ impl Privileged for DirectRoot {
         // From here on, any failure must not leave a half-built namespace
         // behind, so each step tears down on the way out.
         if let Err(e) = tor::start() {
+            // tor daemonises, so a failure here - a bootstrap timeout in
+            // particular - can leave a live daemon behind. Stop it, or the next
+            // run finds its ports already bound.
+            let _ = tor::stop();
             let _ = netns::destroy();
             return Err(e);
         }

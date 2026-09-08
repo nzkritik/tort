@@ -37,6 +37,9 @@ uname -r; nft --version; tor --version | head -1
 echo "ip_forward = $(sysctl -n net.ipv4.ip_forward)"
 echo "tor account = $(getent passwd tor debian-tor _tor | cut -d: -f1 | head -1 || echo none)"
 
+section "orphans from previous runs"
+pgrep -af "/run/tort/torrc" || echo "(none - clean start)"
+
 section "firewall snapshot (before)"
 nft list ruleset > "$BEFORE" 2>/dev/null
 echo "$(wc -l < "$BEFORE") lines captured"
@@ -85,6 +88,9 @@ if [ $UP_RC -ne 0 ] && [ -e /var/run/netns/tort ]; then
     ip netns exec tort timeout 5 bash -c "</dev/tcp/10.66.0.1/9140" 2>&1 \
         && echo "reachable" || echo "NOT reachable"
 fi
+
+section "orphan check after the run"
+pgrep -af "/run/tort/torrc" && echo "ORPHANED tor still running" || echo "(none)"
 
 section "tort down"
 DOWN_OUT=$("$TORT" down 2>&1); DOWN_RC=$?

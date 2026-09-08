@@ -118,6 +118,13 @@ fn chown_tree(path: &Path, uid: nix::unistd::Uid, gid: nix::unistd::Gid) -> Resu
 
 /// Write the config and start tor, waiting until it is actually serving.
 pub fn start() -> Result<()> {
+    // Clear any orphan from an earlier run before binding the same ports.
+    let orphans = our_tor_processes();
+    if !orphans.is_empty() {
+        eprintln!("  cleaning up {} orphaned tor process(es) from a previous run", orphans.len());
+        stop()?;
+    }
+
     fs::create_dir_all(RUN_DIR).with_context(|| format!("creating {RUN_DIR}"))?;
     fs::create_dir_all(DATA_DIR).with_context(|| format!("creating {DATA_DIR}"))?;
 
@@ -269,32 +276,80 @@ fn log_tail() -> String {
     }
 }
 
+/// Every running process whose command line references tort's own torrc.
+///
+/// This is how orphans are found. Matching on the config path is precise: it
+/// cannot match the user's system tor, or any other tor instance, because only
+/// tort ever passes this file. Matching on the process *name* would be
+/// unacceptable - it would kill unrelated tor daemons.
+pub fn our_tor_processes() -> Vec<i32> {
+    let mut pids = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return pids;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.parse::<i32>().ok()) else {
+            continue;
+        };
+        if let Ok(cmdline) = fs::read(entry.path().join("cmdline")) {
+            // /proc cmdline is NUL-separated.
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            if cmdline.contains(TORRC) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
 /// Stop the tor instance tort started - and only that one.
+///
+/// The pidfile alone is not enough. tor daemonises, so a `tort up` that failed
+/// *after* tor forked (a bootstrap timeout, say) left the daemon running with
+/// nothing tracking it; the next run then found its port already bound and
+/// behaved incomprehensibly. Orphans are now found by scanning /proc for
+/// processes started with tort's own torrc.
 pub fn stop() -> Result<()> {
-    if !Path::new(TOR_PID).exists() {
+    let mut pids = our_tor_processes();
+
+    // The pidfile as well, in case the process list missed it.
+    if let Ok(text) = fs::read_to_string(TOR_PID) {
+        if let Ok(pid) = text.trim().parse::<i32>() {
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+
+    if pids.is_empty() {
+        let _ = fs::remove_file(TOR_PID);
         return Ok(());
     }
 
-    let pid: i32 = fs::read_to_string(TOR_PID)
-        .context("reading tor pidfile")?
-        .trim()
-        .parse()
-        .context("tor pidfile did not contain a pid")?;
-
-    // SAFETY-adjacent: the pid comes from a pidfile tort itself configured, in
-    // a root-only runtime directory. We never kill by name, which would risk
-    // taking down a tor the user is running for something else.
-    let _ = nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid),
-        nix::sys::signal::Signal::SIGTERM,
-    );
+    for pid in &pids {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(*pid),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+    }
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if !tcp_port_open(TRANS_PORT) {
+        if our_tor_processes().is_empty() {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // Anything still alive after a polite SIGTERM gets SIGKILL, so a wedged tor
+    // cannot block the next run.
+    for pid in our_tor_processes() {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
     }
 
     let _ = fs::remove_file(TOR_PID);
