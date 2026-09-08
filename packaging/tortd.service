@@ -13,26 +13,31 @@ RuntimeDirectoryMode=0755
 StateDirectory=tort
 StateDirectoryMode=0700
 
-# The daemon needs real privilege - it creates network namespaces, edits
-# nftables and changes uid - so most sandboxing would break it. What can be
-# given up safely is given up.
+# Sandboxing is deliberately minimal, and that is a considered decision rather
+# than an oversight.
 #
-# ProtectHome is deliberately NOT set. It would hide /home, /root and
-# /run/user, and /run/user is where the Wayland and D-Bus sockets live. The
-# daemon's whole purpose for `run` is to hand a user their own session inside
-# the namespace, so hiding that session breaks it: a graphical application
-# fails with "Failed to connect to Wayland display: Permission denied", which
-# looks nothing like a sandboxing setting.
+# This daemon execs arbitrary user programs - that is what `tort run` is - so
+# every sandboxing directive it carries is inherited by the user's browser
+# rather than confining the daemon. The restriction lands on the wrong process
+# and surfaces as a baffling error a long way from its cause:
 #
-# PrivateTmp is likewise absent: browsers are launched with profile directories
-# under /tmp, and a private /tmp would silently give each run a different one.
+#   ProtectHome=yes      hides /run/user, so a graphical application fails with
+#                        "Failed to connect to Wayland display: Permission
+#                        denied" - nothing about that message suggests a unit
+#                        file.
+#   PrivateTmp=yes       gives each run its own /tmp, silently breaking browser
+#                        profiles under /tmp/... and defeating --user-data-dir.
+#   LockPersonality=yes  blocks personality(), which Chromium's sandbox uses.
+#
+# None of them confine the daemon in any meaningful way either: it is root, and
+# it creates network namespaces, rewrites nftables and changes uid. A sandbox
+# that permits all of that is not restricting much.
+#
+# What remains costs the child nothing and is kept.
 NoNewPrivileges=no
 ProtectHostname=yes
 ProtectKernelLogs=yes
-ProtectControlGroups=yes
-RestrictRealtime=yes
 RestrictSUIDSGID=no
-LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

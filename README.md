@@ -236,6 +236,26 @@ not widen what the namespace can actually reach.
 `tort up` detects an active ufw and prints this instruction if verification
 fails.
 
+## A note on sandboxing the daemon
+
+`tortd.service` carries almost no systemd hardening, on purpose.
+
+The daemon execs arbitrary user programs - that is what `tort run` is - so any
+sandboxing directive it carries is inherited by the browser rather than
+confining the daemon. The restriction lands on the wrong process, and shows up
+as an error a long way from its cause: `ProtectHome=yes` hides `/run/user` and
+a graphical application then fails with "Failed to connect to Wayland display:
+Permission denied", which points at Wayland rather than at a unit file.
+
+Nor would those directives confine the daemon meaningfully. It is root, and it
+creates network namespaces, rewrites nftables and changes uid. A sandbox
+permitting all of that is not restricting much.
+
+The real confinement is elsewhere, and it is the point of the design: the
+daemon accepts six verbs over a socket, authorizes each one through polkit
+before doing anything, and identifies the caller from the kernel rather than
+from anything the caller claims.
+
 ## What this does not cover
 
 - **Scope is opt-in.** Only what you run via `tort run` is tunnelled. This is a
