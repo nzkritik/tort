@@ -109,6 +109,11 @@ if [ $UP_RC -ne 0 ] && [ -e /var/run/netns/tort ]; then
         && echo "reachable" || echo "NOT reachable"
 fi
 
+if [ -n "$(nft list table ip tort 2>/dev/null)" ]; then
+    section "rule counters (which rules actually matched)"
+    nft list table ip tort 2>/dev/null | grep -E "counter packets" | sed 's/^[[:space:]]*/  /'
+fi
+
 section "orphan check after the run"
 pgrep -af "/run/tort/torrc" && echo "ORPHANED tor still running" || echo "(none)"
 

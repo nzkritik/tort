@@ -35,7 +35,7 @@ table ip {table} {{
         type nat hook prerouting priority dstnat; policy accept;
 
         # DNS over UDP goes to tor's resolver.
-        iifname "{veth}" udp dport 53 redirect to :{dns}
+        iifname "{veth}" udp dport 53 counter redirect to :{dns}
 
         # Nothing addressed to the gateway itself may enter tor. glibc's
         # resolver falls back to TCP/53 when a UDP answer is truncated, and
@@ -49,9 +49,9 @@ table ip {table} {{
         # 10.0.0.0/8 would also cover tor's VirtualAddrNetworkIPv4
         # (10.192.0.0/10), which is how .onion addresses are routed - excluding
         # it would silently break onion services.
-        iifname "{veth}" ip daddr {subnet} return
+        iifname "{veth}" ip daddr {subnet} counter return
 
-        iifname "{veth}" meta l4proto tcp redirect to :{trans}
+        iifname "{veth}" meta l4proto tcp counter redirect to :{trans}
     }}
 
     # Anything from the namespace that was NOT redirected has no business being
@@ -67,7 +67,7 @@ table ip {table} {{
     chain forward {{
         type filter hook forward priority filter; policy accept;
 
-        iifname "{veth}" drop
+        iifname "{veth}" counter drop
         oifname "{veth}" drop
     }}
 
@@ -87,9 +87,9 @@ table ip {table} {{
         iifname != "{veth}" udp dport {dns} drop
 
         iifname "{veth}" ct state established,related accept
-        iifname "{veth}" tcp dport {trans} accept
-        iifname "{veth}" udp dport {dns} accept
-        iifname "{veth}" drop
+        iifname "{veth}" tcp dport {trans} counter accept
+        iifname "{veth}" udp dport {dns} counter accept
+        iifname "{veth}" counter drop
     }}
 }}
 "#,
@@ -123,6 +123,17 @@ pub fn is_installed() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// The live table with its counters, for diagnosing a tunnel that is up but not
+/// carrying traffic. Which rules matched, and which did not, is the difference
+/// between "the redirect never saw the packet" and "something dropped it after".
+pub fn dump() -> String {
+    Command::new("nft")
+        .args(["list", "table", "ip", NFT_TABLE])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_else(|e| format!("(could not list the table: {e})"))
 }
 
 fn run_nft(script: &str) -> Result<()> {
@@ -165,6 +176,15 @@ mod tests {
             .join("\n")
     }
 
+    /// Rules with the `counter` keyword removed.
+    ///
+    /// Counters are diagnostic instrumentation, not policy. Assertions about
+    /// what the firewall *does* should not break when instrumentation is added
+    /// or removed.
+    fn policy() -> String {
+        rules_only().replace(" counter ", " ")
+    }
+
     #[test]
     fn ruleset_is_an_atomic_replace() {
         let r = ruleset();
@@ -179,7 +199,7 @@ mod tests {
     fn unredirected_namespace_traffic_is_dropped() {
         // The fail-closed property: anything from the namespace that was not
         // redirected to tor dies at the forward hook instead of leaving.
-        let r = ruleset();
+        let r = policy();
         assert!(r.contains(&format!("iifname \"{VETH_HOST}\" drop")));
         assert!(r.contains(&format!("oifname \"{VETH_HOST}\" drop")));
     }
@@ -200,7 +220,7 @@ mod tests {
     fn gateway_traffic_never_enters_tor() {
         // TCP to the gateway (the resolver's TCP/53 fallback) must not be
         // redirected into TransPort, or tor rejects it as a NAT loop.
-        let r = rules_only();
+        let r = policy();
         let ret = r.find(&format!("ip daddr {SUBNET} return")).expect("gateway RETURN present");
         let redir = r.find("meta l4proto tcp redirect").expect("tcp redirect present");
         assert!(ret < redir, "the gateway RETURN must precede the TCP redirect");
@@ -215,15 +235,14 @@ mod tests {
 
     #[test]
     fn tor_ports_are_unreachable_from_outside_the_namespace() {
-        let r = ruleset();
+        let r = policy();
         assert!(r.contains(&format!("iifname != \"{VETH_HOST}\" tcp dport {TRANS_PORT} drop")));
         assert!(r.contains(&format!("iifname != \"{VETH_HOST}\" udp dport {DNS_PORT} drop")));
     }
 
     #[test]
     fn namespace_cannot_reach_arbitrary_host_ports() {
-        let r = ruleset();
-        assert!(r.contains(&format!("iifname \"{VETH_HOST}\" drop")));
+        assert!(policy().contains(&format!("iifname \"{VETH_HOST}\" drop")));
     }
 
     #[test]

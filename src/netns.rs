@@ -146,3 +146,44 @@ pub fn enter() -> Result<()> {
         .context("setns into the tort network namespace")?;
     Ok(())
 }
+
+/// Enter the namespace *and* give this process the namespace's resolver.
+///
+/// setns(CLONE_NEWNET) changes the network namespace and nothing else, so the
+/// process keeps reading the host's /etc/resolv.conf. On a systemd-resolved
+/// host that says `nameserver 127.0.0.53`, which inside the namespace is the
+/// namespace's own loopback - where nothing is listening. DNS then fails
+/// instantly, having never reached the redirect rule, and the tunnel looks
+/// broken for a reason that has nothing to do with tor.
+///
+/// This replicates what `ip netns exec` does: a private mount namespace with
+/// the namespace's own resolv.conf bound over /etc/resolv.conf.
+pub fn enter_with_resolver() -> Result<()> {
+    use nix::mount::{mount, MsFlags};
+    use nix::sched::unshare;
+
+    enter()?;
+
+    unshare(CloneFlags::CLONE_NEWNS).context("unshare mount namespace")?;
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .context("making mounts private")?;
+
+    let ns_resolv = format!("{NETNS_ETC}/resolv.conf");
+    if Path::new(&ns_resolv).exists() {
+        mount(
+            Some(ns_resolv.as_str()),
+            "/etc/resolv.conf",
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .context("binding the namespace resolv.conf")?;
+    }
+    Ok(())
+}

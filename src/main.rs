@@ -117,6 +117,25 @@ fn cmd_up() -> Result<()> {
     // for the user to trust. torc's equivalent path printed a success banner
     // and carried on.
     if !verdict.is_confirmed_safe() {
+        // Show which rules actually matched before tearing the table down. A
+        // redirect counter of zero means the packet never reached the rule; a
+        // non-zero counter with no connectivity means something downstream -
+        // another firewall on the same hook - dropped it afterwards.
+        eprintln!("\nRule counters at the point of failure:\n{}", nft::dump());
+
+        if firewall_may_be_interfering() {
+            eprintln!(
+                "A host firewall is active. tort's rules cannot override it: in netfilter a\n\
+                 DROP in any table wins, whatever another table accepted. Redirected traffic\n\
+                 arrives as a NEW inbound connection on {VETH_HOST}, which ufw denies by default.\n\
+                 \n\
+                 Allow it with:  sudo ufw allow in on {VETH_HOST}\n\
+                 \n\
+                 That is safe: tort's own input chain still restricts the namespace to tor's\n\
+                 two ports and drops everything else."
+            );
+        }
+
         eprintln!("\nRefusing to leave a tunnel up that could not be verified. Tearing down.");
         let _ = DirectRoot.down();
         bail!("tort could not confirm traffic exits through Tor");
@@ -166,6 +185,18 @@ fn cmd_down() -> Result<()> {
 
     println!("tort is down.");
     Ok(())
+}
+
+/// Is another firewall active that could be dropping tort's redirected traffic?
+///
+/// tort deliberately never edits anyone else's rules, so the most it can do is
+/// recognise the situation and say exactly what to run.
+fn firewall_may_be_interfering() -> bool {
+    std::process::Command::new("ufw")
+        .arg("status")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Status: active"))
+        .unwrap_or(false)
 }
 
 fn cmd_status() -> Result<()> {
@@ -219,7 +250,7 @@ fn report_verdict(v: Verdict) {
 fn verify_in_namespace() -> Result<Verdict> {
     match unsafe { fork() }.context("fork for verification")? {
         ForkResult::Child => {
-            let code = match netns::enter() {
+            let code = match netns::enter_with_resolver() {
                 Err(_) => 2,
                 Ok(()) => {
                     let rt = tokio::runtime::Builder::new_current_thread()
@@ -268,40 +299,7 @@ fn cmd_run(argv: &[String]) -> Result<()> {
 }
 
 fn enter_and_exec(argv: &[String]) -> Result<()> {
-    use nix::mount::{mount, MsFlags};
-    use nix::sched::{unshare, CloneFlags};
-
-    netns::enter()?;
-
-    // setns(CLONE_NEWNET) changes only the network namespace, so the process
-    // would still read the host's /etc/resolv.conf. Replicate what
-    // `ip netns exec` does: a private mount namespace with the namespace's own
-    // resolv.conf bound over it.
-    //
-    // This is belt and braces - the nftables rule redirects UDP/53 to any
-    // destination, so DNS reaches tor even with the wrong resolver configured -
-    // but the process should still see the truth.
-    unshare(CloneFlags::CLONE_NEWNS).context("unshare mount namespace")?;
-    mount(
-        None::<&str>,
-        "/",
-        None::<&str>,
-        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-        None::<&str>,
-    )
-    .context("making mounts private")?;
-
-    let ns_resolv = format!("{NETNS_ETC}/resolv.conf");
-    if std::path::Path::new(&ns_resolv).exists() {
-        mount(
-            Some(ns_resolv.as_str()),
-            "/etc/resolv.conf",
-            None::<&str>,
-            MsFlags::MS_BIND,
-            None::<&str>,
-        )
-        .context("binding the namespace resolv.conf")?;
-    }
+    netns::enter_with_resolver()?;
 
     drop_privileges()?;
 

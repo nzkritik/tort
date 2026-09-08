@@ -90,6 +90,29 @@ policy can be added as a second implementation without touching the logic,
 turning the privilege boundary into four verbs rather than "may run arbitrary
 commands as root".
 
+## Coexisting with a host firewall
+
+tort installs its own nftables table and never edits anyone else's rules. That
+is deliberate, but it has a consequence worth stating plainly: **tort cannot
+override a firewall that drops its traffic.** In netfilter every table
+registered on a hook is evaluated, and a DROP in any of them wins regardless of
+what another table accepted.
+
+Redirected traffic arrives at the host as a NEW inbound connection on `tort0`.
+ufw and most host firewalls deny inbound by default, so on such a system you
+must allow it once:
+
+```bash
+sudo ufw allow in on tort0
+```
+
+This is safe. tort's own input chain still restricts the namespace to tor's two
+ports and drops everything else, so opening the interface at the ufw level does
+not widen what the namespace can actually reach.
+
+`tort up` detects an active ufw and prints this instruction if verification
+fails.
+
 ## What this does not cover
 
 - **Scope is opt-in.** Only what you run via `tort run` is tunnelled. This is a
