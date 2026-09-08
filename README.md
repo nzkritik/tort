@@ -111,17 +111,18 @@ it.
 ## Running a browser
 
 ```bash
-sudo -E tort run brave --user-data-dir=/tmp/tort-brave
+sudo tort run brave --user-data-dir=/tmp/tort-brave
 ```
 
-Both parts of that line matter.
+sudo's `env_reset` strips `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and
+the D-Bus address, and without them a graphical application exits immediately
+with something like "Failed to connect to Wayland display". tort discovers all
+of them from the invoking uid — the Wayland display is the name of a socket in
+`/run/user/<uid>`, and X11's is the number in `/tmp/.X11-unix/X<n>` — so
+`sudo -E` is not required. It stays useful for a remote session where the
+sockets are not local.
 
-**`sudo -E`** — sudo's `env_reset` strips `DISPLAY` and `WAYLAND_DISPLAY`, and
-without them a graphical application cannot start at all. tort reconstructs
-`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` from the invoking uid, but the
-display variables cannot be derived - only preserved.
-
-**`--user-data-dir`** — this is a safety measure, not a preference. Every major
+**`--user-data-dir` is a safety measure, not a preference.** Every major
 browser, started a second time against the same profile, does not start a second
 browser: it signals the running instance to open a tab and exits. That instance
 is outside the namespace. The page loads, and nothing indicates the traffic went
