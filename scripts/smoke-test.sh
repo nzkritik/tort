@@ -38,7 +38,7 @@ echo "ip_forward = $(sysctl -n net.ipv4.ip_forward)"
 echo "tor account = $(getent passwd tor debian-tor _tor | cut -d: -f1 | head -1 || echo none)"
 
 section "orphans from previous runs"
-pgrep -af "/run/tort/torrc" || echo "(none - clean start)"
+pgrep -x tor -a 2>/dev/null | grep -F "/run/tort/torrc" || echo "(none - clean start)"
 
 section "firewall snapshot (before)"
 # Tear down first. An earlier run interrupted between `up` and `down` leaves the
@@ -133,7 +133,7 @@ echo "exit code: $DOWN_RC"
 section "orphans after teardown"
 # Checked after `down`, not before: while the tunnel is up a running tor is
 # correct, and calling that an orphan reports a success as a failure.
-pgrep -af "/run/tort/torrc" && echo "ORPHANED tor survived teardown" || echo "(none - clean)"
+pgrep -x tor -a 2>/dev/null | grep -F "/run/tort/torrc" && echo "ORPHANED tor survived teardown" || echo "(none - clean)"
 
 section "firewall comparison (counters normalised)"
 nft list ruleset > "$AFTER" 2>/dev/null

@@ -264,12 +264,18 @@ fn log_tail() -> String {
     }
 }
 
-/// Every running process whose command line references tort's own torrc.
+/// Every running tor process started with tort's own torrc.
 ///
-/// This is how orphans are found. Matching on the config path is precise: it
-/// cannot match the user's system tor, or any other tor instance, because only
-/// tort ever passes this file. Matching on the process *name* would be
-/// unacceptable - it would kill unrelated tor daemons.
+/// Two conditions, and both are necessary. The config path alone is not enough:
+/// any process whose command line merely *mentions* the path matches it - a
+/// shell running a diagnostic, an editor with the file open, a grep. Since the
+/// caller sends these SIGTERM and then SIGKILL, that would kill unrelated
+/// processes, which is precisely the bug this project was written in reaction
+/// to (`ps aux | grep tor` picking up "monitor" and the grep itself).
+///
+/// The process name alone is not enough either - that would match the user's
+/// system tor and every other tor on the machine. Requiring both means: a
+/// process that really is tor, and really is ours.
 pub fn our_tor_processes() -> Vec<i32> {
     let mut pids = Vec::new();
     let Ok(entries) = fs::read_dir("/proc") else {
@@ -281,6 +287,15 @@ pub fn our_tor_processes() -> Vec<i32> {
         let Some(pid) = name.to_str().and_then(|n| n.parse::<i32>().ok()) else {
             continue;
         };
+        // Is this process actually tor? /proc/<pid>/comm is the executable
+        // name, which a process cannot fake merely by mentioning a path.
+        let is_tor = fs::read_to_string(entry.path().join("comm"))
+            .map(|c| c.trim() == "tor")
+            .unwrap_or(false);
+        if !is_tor {
+            continue;
+        }
+
         if let Ok(cmdline) = fs::read(entry.path().join("cmdline")) {
             // /proc cmdline is NUL-separated.
             let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
