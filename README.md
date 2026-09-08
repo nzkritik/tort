@@ -2,10 +2,11 @@
 
 Run applications inside a network namespace whose only route out is Tor.
 
-> **Prototype.** The end-to-end path is verified working - traffic from the
-> namespace exits through Tor, confirmed by check.torproject.org - but this has
-> had far less real-world exposure than the tools it borrows ideas from, on one
-> machine, once. Read "What this does not cover" before relying on it.
+> **Prototype.** Verified working on one machine: ordinary traffic exits through
+> Tor (confirmed by check.torproject.org), onion services resolve and load, the
+> forward-drop counter stays at zero, and the host firewall is byte-identical
+> after teardown. That is a great deal less exposure than the tools it borrows
+> ideas from have had. Read "What this does not cover" before relying on it.
 
 ## The idea
 
@@ -143,10 +144,10 @@ Two further notes for Chromium-based browsers:
 sudo tort onion
 ```
 
-Fetches the Tor Project's own onion service from inside the namespace. This
-exercises a different path from ordinary traffic: tor's `DNSPort` returns a
-virtual address from `VirtualAddrNetworkIPv4` (`10.192.0.0/10`), and the
-redirect must carry a connection to that address into `TransPort`.
+Fetches the Tor Project's own onion service from inside the namespace. Verified
+working. This exercises a different path from ordinary traffic: tor's `DNSPort`
+returns a virtual address from `VirtualAddrNetworkIPv4` (`10.192.0.0/10`), and
+the redirect must carry a connection to that address into `TransPort`.
 
 It is also why the gateway exclusion in the ruleset is a `/24` rather than
 `10.0.0.0/8` - the wider range would swallow the virtual network and break onion
