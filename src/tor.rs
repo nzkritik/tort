@@ -120,14 +120,27 @@ fn chown_tree(path: &Path, uid: nix::unistd::Uid, gid: nix::unistd::Gid) -> Resu
 pub fn start() -> Result<()> {
     fs::create_dir_all(RUN_DIR).with_context(|| format!("creating {RUN_DIR}"))?;
     fs::create_dir_all(DATA_DIR).with_context(|| format!("creating {DATA_DIR}"))?;
+
+    // tor drops to an unprivileged account and only then opens its log, so the
+    // runtime directory must belong to that account or the open fails with
+    // EACCES. Both directories are 0700: the log and the tor state describe the
+    // user's network activity and are nobody else's business.
+    fs::set_permissions(RUN_DIR, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("tightening permissions on {RUN_DIR}"))?;
     // Tor refuses to start if its DataDirectory is group- or world-accessible.
     fs::set_permissions(DATA_DIR, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("tightening permissions on {DATA_DIR}"))?;
 
-    // If tor is going to drop to an unprivileged account, it must own its
-    // DataDirectory or it will refuse to start.
+    fs::write(TORRC, torrc()).with_context(|| format!("writing {TORRC}"))?;
+
+    // Ownership is applied last so it covers everything just written, including
+    // the config itself and anything a previous run left behind.
     if let Some(name) = tor_user() {
         if let Ok(Some(u)) = nix::unistd::User::from_name(&name) {
+            // The runtime directory, so tor can create its own log and pidfile
+            // there after dropping privileges.
+            chown_tree(Path::new(RUN_DIR), u.uid, u.gid)
+                .with_context(|| format!("giving {RUN_DIR} to the '{name}' account"))?;
             // Recursive, not just the top directory. An earlier tort that ran
             // tor as root leaves root-owned subdirectories (keys/, state,
             // cached-*) behind, and tor cannot read them once it drops
@@ -136,8 +149,6 @@ pub fn start() -> Result<()> {
                 .with_context(|| format!("giving {DATA_DIR} to the '{name}' account"))?;
         }
     }
-
-    fs::write(TORRC, torrc()).with_context(|| format!("writing {TORRC}"))?;
 
     let out = Command::new("tor")
         .args(["-f", TORRC])
