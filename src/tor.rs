@@ -38,6 +38,7 @@ pub fn torrc() -> String {
          DataDirectory {data}\n\
          PidFile {pid}\n\
          RunAsDaemon 1\n\
+         Log notice file {log}\n\
          \n\
          # Bound to the host side of the veth so the namespace can reach them.\n\
          TransPort {host}:{trans}\n\
@@ -53,6 +54,7 @@ pub fn torrc() -> String {
         user_line = user_line,
         data = DATA_DIR,
         pid = TOR_PID,
+        log = TOR_LOG,
         host = HOST_ADDR,
         trans = TRANS_PORT,
         dns = DNS_PORT,
@@ -76,8 +78,12 @@ pub fn is_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// Is a port accepting connections on the host side of the veth?
-pub fn port_open(port: u16) -> bool {
+/// Is a **TCP** port accepting connections on the host side of the veth?
+///
+/// Only meaningful for TransPort and SocksPort. tor's DNSPort listens on UDP,
+/// so probing it with a TCP connect always fails no matter how healthy tor is -
+/// which is precisely the bug that made startup look like a tor problem.
+pub fn tcp_port_open(port: u16) -> bool {
     TcpStream::connect_timeout(
         &format!("{HOST_ADDR}:{port}").parse().expect("valid address"),
         Duration::from_millis(300),
@@ -86,7 +92,7 @@ pub fn port_open(port: u16) -> bool {
 }
 
 pub fn is_running() -> bool {
-    port_open(TRANS_PORT)
+    tcp_port_open(TRANS_PORT)
 }
 
 /// Recursively set ownership, without ever following a symlink.
@@ -149,16 +155,39 @@ pub fn start() -> Result<()> {
         );
     }
 
-    // RunAsDaemon returns immediately; wait for the ports to actually serve.
+    // RunAsDaemon means the process we just ran forked and exited, so its exit
+    // status says nothing about whether the daemon survived. Wait for the port
+    // to actually serve instead of trusting the exit code.
+    //
+    // Only TransPort is probed. DNSPort is a UDP listener, and a TCP connect to
+    // it fails whatever tor is doing; DNS is verified functionally instead, by
+    // the end-to-end check resolving a hostname from inside the namespace -
+    // which is a stronger statement than "something is bound to that port".
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        if port_open(TRANS_PORT) && port_open(DNS_PORT) {
+        if tcp_port_open(TRANS_PORT) {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(250));
     }
 
-    bail!("tor started but its TransPort/DNSPort never began accepting connections")
+    bail!(
+        "tor started but its TransPort never began accepting connections.\n\
+         Last lines of {TOR_LOG}:\n{}",
+        log_tail()
+    )
+}
+
+/// The last few lines of tor's log, for when the daemon dies after forking.
+fn log_tail() -> String {
+    match fs::read_to_string(TOR_LOG) {
+        Ok(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(12);
+            lines[start..].join("\n")
+        }
+        Err(e) => format!("(could not read {TOR_LOG}: {e})"),
+    }
 }
 
 /// Stop the tor instance tort started - and only that one.
@@ -183,7 +212,7 @@ pub fn stop() -> Result<()> {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if !port_open(TRANS_PORT) {
+        if !tcp_port_open(TRANS_PORT) {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -202,6 +231,12 @@ mod tests {
         let c = torrc();
         assert!(c.contains("AutomapHostsOnResolve 1"));
         assert!(c.contains("VirtualAddrNetworkIPv4"));
+    }
+
+    #[test]
+    fn tor_logs_to_a_file() {
+        // Without this, a tor that dies after daemonising leaves no explanation.
+        assert!(torrc().contains("Log notice file"));
     }
 
     #[test]

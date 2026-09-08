@@ -64,6 +64,8 @@ else
     echo "--- listening on tort ports ---"
     ss -lntup 2>/dev/null | grep -E "10\.66\.0\.1|9140|9153|9150" || echo "(nothing bound)"
     echo "--- generated torrc ---";   cat /run/tort/torrc 2>/dev/null || echo "(none written)"
+    echo "--- tor log (the daemon's own account, post-fork) ---"
+    tail -20 /run/tort/tor.log 2>/dev/null || echo "(no tor log)"
     echo "--- tor --verify-config ---"
     tor -f /run/tort/torrc --verify-config 2>&1 | tail -8
     echo "--- tort nft table ---";    nft list table ip tort 2>&1 | head -30
