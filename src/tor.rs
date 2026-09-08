@@ -8,7 +8,6 @@
 
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
