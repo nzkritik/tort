@@ -20,7 +20,6 @@ use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
 
 use crate::config::SOCKET_PATH;
 use crate::polkit::{self, Decision};
@@ -76,7 +75,11 @@ fn handle(stream: UnixStream) -> Result<()> {
     let (pid, uid, gid) = (creds.pid(), creds.uid(), creds.gid());
 
     // Read the request line, collecting any file descriptors sent with it.
-    let (line, fds) = read_request(&stream)?;
+    let Some((line, fds)) = read_request(&stream)? else {
+        // The client connected and said nothing. Not an error worth logging -
+        // it happens whenever something is checking whether we are listening.
+        return Ok(());
+    };
     let request: Request = serde_json::from_str(&line)
         .context("the client sent a malformed request")?;
 
@@ -170,7 +173,7 @@ fn reply(mut stream: &UnixStream, response: &Response) -> Result<()> {
 /// The descriptors arrive as SCM_RIGHTS ancillary data on the same message, so
 /// they must be collected during the recvmsg that reads the request - a plain
 /// BufReader would discard them.
-fn read_request(stream: &UnixStream) -> Result<(String, Vec<OwnedFd>)> {
+fn read_request(stream: &UnixStream) -> Result<Option<(String, Vec<OwnedFd>)>> {
     use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
     use std::io::IoSliceMut;
 
@@ -201,17 +204,15 @@ fn read_request(stream: &UnixStream) -> Result<(String, Vec<OwnedFd>)> {
     let line = String::from_utf8_lossy(&buf[..len]).trim().to_string();
 
     if line.is_empty() {
-        // Fall back to a buffered read for a request split across messages.
+        // Either the request spans several messages, or the client hung up.
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line)?;
-        return Ok((line.trim().to_string(), fds));
+        let line = line.trim().to_string();
+        return Ok(if line.is_empty() { None } else { Some((line, fds)) });
     }
 
-    Ok((line, fds))
+    Ok(Some((line, fds)))
 }
 
-/// Is the daemon reachable?
-pub fn is_available() -> bool {
-    Path::new(SOCKET_PATH).exists() && UnixStream::connect(SOCKET_PATH).is_ok()
-}
+

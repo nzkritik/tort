@@ -100,28 +100,34 @@ fn find_x11_display() -> Option<String> {
     names.into_iter().next().map(|n| format!(":{n}"))
 }
 
-/// Send a request and return the daemon's response.
+/// Connect to the daemon, or None if it is not there.
+///
+/// There is deliberately no separate "is the daemon available?" probe. The
+/// obvious one - connect, then drop the connection - makes the daemon accept a
+/// client that never speaks, and log a malformed-request error on every single
+/// CLI invocation. Connect once and use that connection for the real request.
+pub fn connect() -> Option<UnixStream> {
+    UnixStream::connect(SOCKET_PATH).ok()
+}
+
+/// Send a request on an established connection and return the response.
 ///
 /// `stdio` is passed for `Run`: the daemon has no terminal of its own, so the
 /// caller lends it these descriptors over SCM_RIGHTS.
-pub fn send(request: &Request, stdio: Option<[RawFd; 3]>) -> Result<Response> {
-    let stream = UnixStream::connect(SOCKET_PATH).with_context(|| {
-        format!("connecting to {SOCKET_PATH} - is the tort daemon running? (systemctl start tortd)")
-    })?;
-
+pub fn send(stream: &UnixStream, request: &Request, stdio: Option<[RawFd; 3]>) -> Result<Response> {
     let mut line = serde_json::to_string(request)?;
     line.push('\n');
 
     match stdio {
-        Some(fds) => send_with_fds(&stream, line.as_bytes(), &fds)?,
+        Some(fds) => send_with_fds(stream, line.as_bytes(), &fds)?,
         None => {
-            let mut s = &stream;
+            let mut s = stream;
             s.write_all(line.as_bytes())?;
             s.flush()?;
         }
     }
 
-    let mut reader = BufReader::new(&stream);
+    let mut reader = BufReader::new(stream);
     let mut response = String::new();
     reader
         .read_line(&mut response)

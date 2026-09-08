@@ -97,8 +97,8 @@ fn main() -> Result<()> {
     // Two ways to do the work. Through the daemon, polkit decides whether the
     // caller may proceed and no sudo is involved. Running as root directly is
     // kept for systems without the daemon installed, and for developing it.
-    let code = if daemon::is_available() {
-        via_daemon(request)?
+    let code = if let Some(stream) = client::connect() {
+        via_daemon(&stream, request)?
     } else if Uid::effective().is_root() {
         locally(request)?
     } else {
@@ -113,7 +113,7 @@ fn main() -> Result<()> {
 }
 
 /// Ask the daemon, lending it this process's terminal when running a command.
-fn via_daemon(request: Request) -> Result<i32> {
+fn via_daemon(stream: &std::os::unix::net::UnixStream, request: Request) -> Result<i32> {
     let stdio = match request {
         Request::Run { .. } => Some([
             std::io::stdin().as_raw_fd(),
@@ -124,7 +124,7 @@ fn via_daemon(request: Request) -> Result<i32> {
     };
 
     let is_up = matches!(request, Request::Up);
-    let response = client::send(&request, stdio)?;
+    let response = client::send(stream, &request, stdio)?;
 
     // The firewall hint is worth showing on a failed `up`, since a host
     // firewall dropping the redirected traffic is the one failure tort cannot
