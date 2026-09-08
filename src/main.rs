@@ -71,9 +71,7 @@ fn main() -> Result<()> {
         }
         Commands::Down => {
             require_root("down")?;
-            DirectRoot.down()?;
-            println!("tort is down. The namespace, rules and tor instance are gone.");
-            Ok(())
+            cmd_down()
         }
         Commands::Verify => {
             require_root("verify")?;
@@ -125,6 +123,48 @@ fn cmd_up() -> Result<()> {
     }
 
     println!("\ntort is up. Run applications with:  sudo tort run <command>");
+    Ok(())
+}
+
+/// Tear down, reporting only what was actually there.
+///
+/// The first version printed "the namespace, rules and tor instance are gone"
+/// unconditionally - including when nothing had been running, so it claimed to
+/// have done work it had not. That is the same unconditional-success reporting
+/// this project exists to avoid, so teardown now names what it removed and
+/// re-reads the kernel afterwards to confirm it really went.
+fn cmd_down() -> Result<()> {
+    let before = (netns::exists(), nft::is_installed(), tor::is_running());
+
+    if !before.0 && !before.1 && !before.2 {
+        println!("tort was not up - nothing to do.");
+        return Ok(());
+    }
+
+    let result = DirectRoot.down();
+
+    // Re-read from the kernel rather than trusting that down() succeeded.
+    let after = (netns::exists(), nft::is_installed(), tor::is_running());
+
+    for (label, was, still) in [
+        ("namespace", before.0, after.0),
+        ("nftables table", before.1, after.1),
+        ("tor instance", before.2, after.2),
+    ] {
+        match (was, still) {
+            (true, false) => println!("  removed: {label}"),
+            (true, true) => println!("  STILL PRESENT: {label}"),
+            (false, _) => println!("  (was not present: {label})"),
+        }
+    }
+
+    result?;
+
+    if after.0 || after.1 || after.2 {
+        bail!("teardown did not fully succeed - see above");
+    }
+
+    println!("tort is down.");
     Ok(())
 }
 
