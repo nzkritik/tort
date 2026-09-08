@@ -154,6 +154,36 @@ It is also why the gateway exclusion in the ruleset is a `/24` rather than
 `10.0.0.0/8` - the wider range would swallow the virtual network and break onion
 routing while leaving ordinary browsing working, which is a bad way to find out.
 
+### Browsers block .onion themselves
+
+A browser inside the tunnel may refuse `.onion` addresses even though the
+network path works. Chromium-based browsers do not resolve `.onion` (RFC 7686
+reserves it for Tor-aware software), and Brave goes further, intercepting such
+navigation to steer you toward its own Tor window:
+
+```
+This page has been blocked by Brave
+ERR_BLOCKED_BY_CLIENT
+```
+
+That is the browser refusing before a packet is sent, not a routing failure.
+`sudo tort onion` fetching the same address proves the tunnel carries it.
+
+**Do not use Brave's built-in Tor window to work around this.** It starts
+Brave's own bundled tor, whose traffic would then be redirected into tort's tor
+as well - Tor over Tor. That is not additional protection; it lengthens the
+circuit for no benefit and is explicitly discouraged by the Tor Project.
+
+For `.onion` browsing inside tort, use Firefox with `.onion` resolution allowed:
+
+```bash
+sudo tort run firefox --profile /tmp/tort-firefox
+```
+
+then set `network.dns.blockDotOnion` to `false` in `about:config`. Firefox
+blocks the TLD by default for the same RFC 7686 reason; with a transparent proxy
+in front of it, resolution is exactly what you want it to do.
+
 ## Coexisting with a host firewall
 
 tort installs its own nftables table and never edits anyone else's rules. That
