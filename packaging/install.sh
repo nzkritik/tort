@@ -32,8 +32,13 @@ if systemctl is-active --quiet tortd; then
 fi
 
 echo
-echo "Installed. Start the daemon with:"
-echo "  sudo systemctl enable --now tortd"
+if systemctl is-active --quiet tortd; then
+    echo "Installed. The daemon has been restarted with the new binary."
+else
+    echo "Installed. Enable and start the daemon with:"
+    # --now both enables at boot and starts immediately; no separate start needed.
+    echo "  sudo systemctl enable --now tortd"
+fi
 echo
 echo "Then, as your normal user and with no sudo:"
 echo "  tort up"

@@ -70,16 +70,75 @@ Consequences worth spelling out:
 
 ## Installing
 
+Requires Rust, `tor`, `nftables`, `iproute2` and `polkit`.
+
 ```bash
+git clone https://github.com/nzkritik/tort.git
+cd tort
 sudo ./packaging/install.sh
 sudo systemctl enable --now tortd
 ```
 
-This installs the binary, a polkit policy and a systemd unit. After it, tort is
-used **without sudo** — polkit decides whether you may proceed.
+That is all of it. `enable --now` both enables the unit at boot **and** starts
+it immediately, so no separate `systemctl start` is needed.
 
-Without the daemon every command still works when run as root directly, which is
-how the tool was developed and remains the fallback on systems without polkit.
+The installer builds the binary, installs it to `/usr/local/bin/tort`, and
+installs a polkit policy and a systemd unit. If the daemon is already running it
+restarts it, so an install always leaves the running daemon matching the binary
+just built.
+
+After this, tort is used **without sudo** — the daemon holds the privilege and
+polkit decides whether you may ask for it.
+
+Check it came up:
+
+```console
+$ systemctl is-active tortd
+active
+
+$ tort status
+namespace      : absent
+nftables table : absent
+tor            : absent
+
+tort is down.
+```
+
+### Without installing
+
+You can try it from the build directory. Every command works when run as root
+directly, which is how the tool was developed and remains the fallback on
+systems without polkit:
+
+```bash
+cargo build --release
+sudo ./target/release/tort up
+```
+
+### Updating
+
+```bash
+git pull
+sudo ./packaging/install.sh
+```
+
+The installer restarts the daemon for you. Note that a restart stops the tor
+instance the daemon started, so an active tunnel does not survive an update —
+`tort up` again afterwards.
+
+### Uninstalling
+
+```bash
+sudo systemctl disable --now tortd
+sudo rm /usr/local/bin/tort \
+        /etc/systemd/system/tortd.service \
+        /usr/share/polkit-1/actions/io.github.nzkritik.tort.policy
+sudo systemctl daemon-reload
+sudo rm -rf /var/lib/tort
+```
+
+`tort down` first if a tunnel is up, so the namespace and firewall rules are
+removed while the tool that knows about them is still installed.
 
 ## Usage
 
