@@ -8,6 +8,13 @@ Run applications inside a network namespace whose only route out is Tor.
 > after teardown. That is a great deal less exposure than the tools it borrows
 > ideas from have had. Read "What this does not cover" before relying on it.
 
+![The tortunnel window: a status panel confirming traffic exits through Tor, a
+list of three circuits each with a colour, and a map of Europe with each
+circuit drawn as a coloured path from guard to exit.](docs/tortunnel.png)
+
+*Relay names and the exit address in this screenshot are placeholders — see
+[docs/README.md](docs/README.md).*
+
 ## At a glance
 
 ```console
@@ -145,6 +152,8 @@ removed while the tool that knows about them is still installed.
 ```bash
 tortunnel
 ```
+
+![tortunnel](docs/tortunnel.png)
 
 "Tor Traffic Tunnel" — a GTK4 front end, built automatically when GTK4 is
 present. Four areas: a top bar with connect/disconnect and buttons to run a
