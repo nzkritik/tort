@@ -253,7 +253,7 @@ fn build_ui(app: &Application) {
         // Launch a terminal running `tort shell` rather than proxying a shell
         // through the GUI: a terminal emulator is already very good at being a
         // terminal, and tort inherits its stdio naturally.
-        spawn_detached(&terminal_command("tort shell"));
+        launch_in_terminal(&["tort", "shell"]);
     });
 
     {
@@ -681,17 +681,101 @@ fn prompt_for_command(parent: &ApplicationWindow) {
     dialog.present();
 }
 
-/// The user's terminal emulator, running a command.
-fn terminal_command(inner: &str) -> String {
-    for terminal in ["ghostty", "alacritty", "foot", "kitty", "xterm"] {
-        if which(terminal) {
-            return format!("{terminal} -e {inner}");
-        }
-    }
-    inner.to_string()
+/// Run a command in the user's terminal.
+///
+/// Finding "the default terminal" on Linux has no single answer, so the sources
+/// are consulted in order of how authoritative they are about the user's
+/// *choice* rather than what happens to be installed. An earlier version simply
+/// took the first terminal it found on disk, which is not the same question: a
+/// machine with three terminals installed has one the user actually wants.
+fn launch_in_terminal(command: &[&str]) {
+    let Some((program, prefix)) = terminal_launcher() else {
+        eprintln!("tortunnel: no terminal emulator found");
+        return;
+    };
+
+    // Built as an argument vector rather than a shell string: nothing here needs
+    // a shell, and a shell would mean worrying about quoting.
+    let _ = std::process::Command::new(&program)
+        .args(&prefix)
+        .args(command)
+        .spawn();
 }
 
+/// The terminal to use, and the arguments that precede the command.
+fn terminal_launcher() -> Option<(String, Vec<String>)> {
+    // 1. $TERMINAL. An explicit statement of preference, so it wins.
+    if let Ok(terminal) = std::env::var("TERMINAL") {
+        if !terminal.is_empty() && which(&terminal) {
+            return Some((terminal.clone(), launch_prefix(&terminal)));
+        }
+    }
+
+    // 2. xdg-terminal-exec, the freedesktop tool that exists to answer exactly
+    //    this question. It takes the command directly, with no -e to guess at.
+    if which("xdg-terminal-exec") {
+        return Some(("xdg-terminal-exec".into(), Vec::new()));
+    }
+
+    // 3. The desktop's configured default.
+    if let Some(terminal) = gnome_default_terminal() {
+        if which(&terminal) {
+            return Some((terminal.clone(), launch_prefix(&terminal)));
+        }
+    }
+
+    // 4. Debian's alternatives system.
+    if which("x-terminal-emulator") {
+        return Some(("x-terminal-emulator".into(), vec!["-e".into()]));
+    }
+
+    // 5. Last resort: something, anything, that is installed.
+    ["ghostty", "alacritty", "foot", "kitty", "wezterm", "konsole", "gnome-terminal", "xterm"]
+        .into_iter()
+        .find(|t| which(t))
+        .map(|t| (t.to_string(), launch_prefix(t)))
+}
+
+/// The arguments a given terminal wants before the command it should run.
+///
+/// There is no convention here worth relying on: some take the command bare,
+/// some want `-e`, some `--`. Guessing wrong opens an empty terminal, which
+/// looks like the feature is broken rather than mis-invoked.
+fn launch_prefix(terminal: &str) -> Vec<String> {
+    let name = std::path::Path::new(terminal)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(terminal);
+
+    match name {
+        "xdg-terminal-exec" | "kitty" | "foot" => Vec::new(),
+        "wezterm" => vec!["start".into(), "--".into()],
+        "gnome-terminal" | "tilix" | "blackbox" => vec!["--".into()],
+        _ => vec!["-e".into()],
+    }
+}
+
+fn gnome_default_terminal() -> Option<String> {
+    let output = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.default-applications.terminal", "exec"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"')
+        .to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+/// Is this program runnable - either an absolute path, or on PATH?
 fn which(program: &str) -> bool {
+    if program.contains('/') {
+        return std::path::Path::new(program).is_file();
+    }
     std::process::Command::new("which")
         .arg(program)
         .output()

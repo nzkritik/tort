@@ -191,6 +191,11 @@ Three details worth knowing:
   **Run app** shells out to `tort run`. The GUI does not reimplement either: the
   CLI already lends the daemon its terminal, drops to the calling user and
   performs the browser-handoff check.
+- The terminal is resolved in order of how authoritative each source is about
+  your *choice*: `$TERMINAL`, then `xdg-terminal-exec` (the freedesktop tool
+  that exists to answer this), then the desktop's configured default, then
+  Debian's `x-terminal-emulator`, and only then whatever is installed. "First
+  terminal found on disk" is a different question from "the terminal you want".
 - Circuit colours are paired with the circuit number everywhere they appear, so
   nothing depends on colour vision.
 
