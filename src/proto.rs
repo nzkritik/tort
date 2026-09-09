@@ -66,13 +66,20 @@ impl Request {
     pub fn polkit_action(&self) -> Option<&'static str> {
         match self {
             Request::Up | Request::Down => Some("io.github.nzkritik.tort.manage"),
-            // Route is authorized like run, not like status. It names the
-            // guard relay, which is long-lived and identifies its user far more
-            // than an exit address does; on a machine with other local accounts
-            // that is not something to hand out unauthenticated.
-            Request::Verify | Request::Onion | Request::Route | Request::Run { .. } => {
+            Request::Verify | Request::Onion | Request::Run { .. } => {
                 Some("io.github.nzkritik.tort.run")
             }
+            // Route has an action of its own, allowed without a password for
+            // the active local session and requiring admin otherwise.
+            //
+            // It names the guard relay, which is long-lived and identifies its
+            // user far more than an exit address does, so it should not be
+            // readable by another account or a remote session. But the person
+            // sitting at the machine is the person whose circuits these are,
+            // and the graphical client refreshes this every few seconds - under
+            // the same policy as `run` it was denied on every poll, because a
+            // poll is deliberately not allowed to raise a password dialog.
+            Request::Route => Some("io.github.nzkritik.tort.inspect"),
             Request::Status => None,
         }
     }

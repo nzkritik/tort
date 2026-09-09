@@ -41,4 +41,22 @@
     </defaults>
   </action>
 
+  <!--
+    Reading circuits is treated differently from running things. The guard relay
+    it names is long-lived and identifies its user, so another account or a
+    remote session must authenticate. But the person at the console is the
+    person whose circuits these are, and the graphical client refreshes the list
+    every few seconds: requiring a password there would either nag constantly or
+    show nothing at all.
+  -->
+  <action id="io.github.nzkritik.tort.inspect">
+    <description>Inspect Tor circuits</description>
+    <message>Authentication is required to inspect the Tor circuits in use</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
 </policyconfig>

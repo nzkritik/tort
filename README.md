@@ -473,10 +473,15 @@ control port is never bound to the veth address.
 Relay countries come from tor's own GeoIP database rather than a web service, so
 inspecting a circuit tells no third party which relays you are using.
 
-`route` requires the same authorization as `run`, not the lighter treatment
-`status` gets. It names the **guard** relay, which is long-lived and identifies
-its user far more than an exit address does - not something to hand out
-unauthenticated on a machine with other local accounts.
+`route` has a polkit action of its own: permitted without a password for the
+**active local session**, and requiring admin authentication for anything else.
+
+It names the **guard** relay, which is long-lived and identifies its user far
+more than an exit address does, so another account or a remote session must
+authenticate for it. But the person sitting at the machine is the person whose
+circuits these are, and the GUI refreshes the list every few seconds — under the
+same policy as `run` it was denied on every poll, because a poll is deliberately
+not allowed to raise a password dialog.
 
 Only built, general-purpose circuits are listed in detail — tor also keeps
 circuits for directory fetches and onion service work — but the count of those

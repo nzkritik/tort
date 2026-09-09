@@ -46,6 +46,8 @@ enum Update {
     /// One line the daemon wrote while working - tor's bootstrap progress.
     Progress(String),
     Circuits(Vec<Circuit>),
+    /// Circuits could not be read, and why.
+    CircuitsUnavailable(String),
     /// A long operation finished; the text is for the activity line.
     Done(String),
     Failed(String),
@@ -305,6 +307,14 @@ fn build_ui(app: &Application) {
                         *drawn_circuits.borrow_mut() = circuits;
                         map_area.queue_draw();
                     }
+                    Update::CircuitsUnavailable(reason) => {
+                        // Only while the tunnel is up. With it down there are
+                        // legitimately no circuits, and "not authorized" would
+                        // be a confusing thing to read.
+                        if *is_up.borrow() {
+                            show_message(&circuit_list, &reason);
+                        }
+                    }
                     Update::Done(text) => activity.set_text(&text),
                     Update::Failed(message) => {
                         activity.set_text(&format!("Failed: {message}"));
@@ -421,9 +431,17 @@ fn spawn_query(sender: async_channel::Sender<Update>, request: Request) {
         let update = match send(&request, None, false) {
             Ok(Response::Status(report)) => Update::Status(Box::new(report)),
             Ok(Response::Circuits { circuits }) => Update::Circuits(circuits),
-            // A refused or failed poll is not worth interrupting the user over;
-            // `route` in particular is denied until they authenticate, and
-            // nagging every ten seconds would be worse than saying nothing.
+
+            // Say why, in the pane the answer belongs in. Returning silently
+            // here is what made a policy problem look like a missing feature:
+            // circuits simply never appeared, with nothing on screen or in the
+            // log to suggest the request had been refused rather than empty.
+            Ok(Response::Denied { message }) if matches!(request, Request::Route) => {
+                Update::CircuitsUnavailable(format!("Not authorized to read circuits.\n{message}"))
+            }
+            Ok(Response::Failed { message }) if matches!(request, Request::Route) => {
+                Update::CircuitsUnavailable(message)
+            }
             _ => return,
         };
         let _ = sender.send_blocking(update);
@@ -586,10 +604,7 @@ fn show_circuits(list: &gtk::Box, circuits: &[Circuit]) {
         .collect();
 
     if general.is_empty() {
-        let empty = gtk::Label::new(Some("No circuits carrying traffic yet."));
-        empty.add_css_class("dim-label");
-        empty.set_xalign(0.0);
-        list.append(&empty);
+        show_message(list, "No circuits carrying traffic yet.");
         return;
     }
 
@@ -619,6 +634,18 @@ fn show_circuits(list: &gtk::Box, circuits: &[Circuit]) {
         row.append(&hops);
         list.append(&row);
     }
+}
+
+/// Replace the circuit list with a single line of explanation.
+fn show_message(list: &gtk::Box, text: &str) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("dim-label");
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    list.append(&label);
 }
 
 fn describe_hops(circuit: &Circuit) -> String {
