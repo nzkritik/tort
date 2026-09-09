@@ -23,6 +23,8 @@ pub enum Request {
     Verify,
     /// Fetch a known onion service from inside the namespace.
     Onion,
+    /// List the circuits tor has built, hop by hop.
+    Route,
     /// Run a command inside the namespace as the calling user.
     ///
     /// The client passes its stdin, stdout and stderr alongside this message as
@@ -50,7 +52,11 @@ impl Request {
     pub fn polkit_action(&self) -> Option<&'static str> {
         match self {
             Request::Up | Request::Down => Some("io.github.nzkritik.tort.manage"),
-            Request::Verify | Request::Onion | Request::Run { .. } => {
+            // Route is authorized like run, not like status. It names the
+            // guard relay, which is long-lived and identifies its user far more
+            // than an exit address does; on a machine with other local accounts
+            // that is not something to hand out unauthenticated.
+            Request::Verify | Request::Onion | Request::Route | Request::Run { .. } => {
                 Some("io.github.nzkritik.tort.run")
             }
             Request::Status => None,
@@ -65,6 +71,7 @@ impl Request {
             Request::Status => "status".into(),
             Request::Verify => "verify".into(),
             Request::Onion => "onion".into(),
+            Request::Route => "route".into(),
             Request::Run { argv, .. } => format!("run {}", argv.join(" ")),
         }
     }

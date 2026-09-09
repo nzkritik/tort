@@ -45,6 +45,13 @@ pub fn torrc() -> String {
          DNSPort {host}:{dns}\n\
          SocksPort 127.0.0.1:{socks}\n\
          \n\
+         # Control port for circuit inspection. Loopback only: this is never\n\
+         # reachable from the namespace, because anything that can talk to it\n\
+         # can reconfigure tor.\n\
+         ControlPort 127.0.0.1:{control}\n\
+         CookieAuthentication 1\n\
+         CookieAuthFile {cookie}\n\
+         \n\
          # Required for .onion resolution through the transparent proxy.\n\
          AutomapHostsOnResolve 1\n\
          VirtualAddrNetworkIPv4 10.192.0.0/10\n\
@@ -59,6 +66,8 @@ pub fn torrc() -> String {
         trans = TRANS_PORT,
         dns = DNS_PORT,
         socks = SOCKS_PORT,
+        control = CONTROL_PORT,
+        cookie = CONTROL_COOKIE,
     )
 }
 
@@ -423,6 +432,15 @@ mod tests {
         if tor_user().is_some() {
             assert!(torrc().contains("\nUser "), "torrc should contain a User directive");
         }
+    }
+
+    #[test]
+    fn control_port_is_loopback_only() {
+        // The single most dangerous thing to expose to the namespace. Anything
+        // that reaches an authenticated control port owns the tor instance.
+        let c = torrc();
+        assert!(c.contains(&format!("ControlPort 127.0.0.1:{CONTROL_PORT}")));
+        assert!(!c.contains(&format!("ControlPort {HOST_ADDR}")));
     }
 
     #[test]

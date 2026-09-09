@@ -138,6 +138,15 @@ fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response
             Ok(r) => Response::Ok { output: verify::describe_result(&r) },
             Err(e) => Response::Failed { message: format!("{e:#}") },
         },
+        Request::Route => {
+            if !DirectRoot.is_up() {
+                return Response::Failed { message: "tort is not up - run `tort up` first".into() };
+            }
+            match crate::control::circuits() {
+                Ok(c) => Response::Ok { output: crate::control::describe(&c) },
+                Err(e) => Response::Failed { message: format!("{e:#}") },
+            }
+        }
         Request::Onion => match run::onion_in_namespace() {
             Ok(msg) => Response::Ok { output: msg },
             Err(e) => Response::Failed { message: format!("{e:#}") },

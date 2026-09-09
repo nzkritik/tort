@@ -24,6 +24,17 @@ pub const TRANS_PORT: u16 = 9140;
 pub const DNS_PORT: u16 = 9153;
 pub const SOCKS_PORT: u16 = 9150;
 
+/// Tor's control port.
+///
+/// Bound to host loopback, never to the veth. Anything that can reach this port
+/// and authenticate can reconfigure tor - change its exit policy, ask it to
+/// build circuits, read its state. A program inside the namespace is exactly
+/// what tort exists to contain, so it must not be able to reach it.
+pub const CONTROL_PORT: u16 = 9151;
+
+/// Tor writes its control authentication cookie here.
+pub const CONTROL_COOKIE: &str = "/run/tort/tor/control_auth_cookie";
+
 /// nftables table name. Everything tort installs lives in this one table so it
 /// can be replaced or removed as a single atomic transaction.
 pub const NFT_TABLE: &str = "tort";

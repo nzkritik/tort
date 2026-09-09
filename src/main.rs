@@ -11,6 +11,7 @@
 
 mod client;
 mod config;
+mod control;
 mod daemon;
 mod netns;
 mod nft;
@@ -57,6 +58,8 @@ enum Commands {
     Verify,
     /// Fetch a known onion service, testing .onion resolution and routing.
     Onion,
+    /// Show the circuits tor has built, hop by hop.
+    Route,
     /// Print the nftables ruleset without applying it.
     Ruleset,
     /// Run the privileged daemon. Started by systemd, not by hand.
@@ -83,6 +86,7 @@ fn main() -> Result<()> {
         Commands::Status => Request::Status,
         Commands::Verify => Request::Verify,
         Commands::Onion => Request::Onion,
+        Commands::Route => Request::Route,
         Commands::Run { argv } => {
             browser_safety_check(argv)?;
             Request::Run { argv: argv.clone(), env: client::session_env() }
@@ -161,6 +165,13 @@ fn locally(request: Request) -> Result<i32> {
         }
         Request::Verify => {
             println!("{}", verify::describe_result(&run::verify_in_namespace()?));
+            Ok(0)
+        }
+        Request::Route => {
+            if !DirectRoot.is_up() {
+                bail!("tort is not up - run `tort up` first");
+            }
+            println!("{}", control::describe(&control::circuits()?));
             Ok(0)
         }
         Request::Onion => {

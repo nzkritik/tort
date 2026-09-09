@@ -64,6 +64,7 @@ tort shell               # interactive shell inside the tunnel
 tort status              # what is actually running, read from the kernel
 tort verify              # confirm traffic exits via Tor
 tort onion               # fetch a known onion service
+tort route               # show the circuits tor has built, hop by hop
 tort down                # remove everything
 tort ruleset             # print the nftables ruleset without applying it
 ```
@@ -167,6 +168,38 @@ Two further notes for Chromium-based browsers:
   connection to each host may pause. `--disable-quic` avoids the wait.
 - **WebRTC cannot leak your address**, because the UDP it needs is dropped. It
   will simply not work.
+
+## Inspecting circuits
+
+```bash
+tort route
+```
+
+```
+circuit 5 (general)
+  guard   Unnamed              185.220.101.4 (DE)
+  middle  relayvier            51.15.60.1 (NL)
+  exit    Quintex12            199.195.251.78 (US)
+```
+
+Read over tor's control port, which is bound to **host loopback only** and
+authenticated with tor's cookie file. That restriction is the important part:
+an authenticated control connection can reconfigure tor entirely, so a program
+inside the namespace reaching it could uncontain itself. The namespace can
+reach tor's `TransPort` and `DNSPort` and nothing else, and a test asserts the
+control port is never bound to the veth address.
+
+Relay countries come from tor's own GeoIP database rather than a web service, so
+inspecting a circuit tells no third party which relays you are using.
+
+`route` requires the same authorization as `run`, not the lighter treatment
+`status` gets. It names the **guard** relay, which is long-lived and identifies
+its user far more than an exit address does - not something to hand out
+unauthenticated on a machine with other local accounts.
+
+Only built, general-purpose circuits are listed. Tor also keeps circuits for
+directory fetches and onion service work, and including them makes the output
+confusing rather than informative.
 
 ### Where the exit node lookup goes
 
