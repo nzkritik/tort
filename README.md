@@ -8,6 +8,32 @@ Run applications inside a network namespace whose only route out is Tor.
 > after teardown. That is a great deal less exposure than the tools it borrows
 > ideas from have had. Read "What this does not cover" before relying on it.
 
+## At a glance
+
+```console
+$ tort up
+  tor: 0% (starting): Starting
+  tor: 5% (conn): Connecting to a relay
+  tor: 14% (handshake): Handshaking with a relay
+  tor: 95% (circuit_create): Establishing a Tor circuit
+  tor bootstrapped
+confirmed: traffic from the namespace exits through Tor
+  exit node : 203.0.113.42
+  location  : Reykjavik, Capital Region, Iceland
+  operator  : AS64500 Example Relay Collective
+
+tort is up. Run applications with:  tort run <command>
+
+$ tort run curl -s https://check.torproject.org/api/ip
+{"IsTor":true,"IP":"203.0.113.42"}
+
+$ tort down
+tort is down.
+```
+
+No `sudo` on any of those. The daemon holds the privilege; polkit decides
+whether you may ask.
+
 ## The idea
 
 Most "route everything through Tor" tools are **fail-open**: traffic reaches the
@@ -57,23 +83,154 @@ how the tool was developed and remains the fallback on systems without polkit.
 
 ## Usage
 
-```bash
-tort up                  # create namespace, start tor, install rules, verify
-tort run firefox         # run one app inside the tunnel, as your user
-tort shell               # interactive shell inside the tunnel
-tort status              # what is actually running, read from the kernel
-tort verify              # confirm traffic exits via Tor
-tort onion               # fetch a known onion service
-tort route               # show the circuits tor has built, hop by hop
-tort down                # remove everything
-tort ruleset             # print the nftables ruleset without applying it
+| Command | What it does |
+|---|---|
+| `tort up` | Create the namespace, start tor, install the rules, verify |
+| `tort run <cmd>` | Run one command inside the tunnel, as you |
+| `tort shell` | Interactive shell inside the tunnel |
+| `tort status` | What is actually running, read from the kernel |
+| `tort verify` | Confirm traffic exits through Tor |
+| `tort route` | Show the circuits tor has built, hop by hop |
+| `tort onion` | Fetch a known onion service |
+| `tort down` | Remove everything |
+| `tort ruleset` | Print the nftables ruleset without applying it |
+
+Commands that change state or enter the namespace are authorized through polkit.
+`status` is not: it reads kernel state and changes nothing, and requiring a
+password to ask "am I protected right now?" would discourage checking.
+
+### `tort up`
+
+Verifies before returning, and **tears itself down if it cannot confirm** that
+traffic exits through Tor. It will not leave a tunnel up that it could not prove
+works:
+
+```console
+$ tort up
+  tor: 0% (starting): Starting
+  tor: 95% (circuit_create): Establishing a Tor circuit
+  tor bootstrapped
+confirmed: traffic from the namespace exits through Tor
+  exit node : 203.0.113.42
+  location  : Reykjavik, Capital Region, Iceland
+  operator  : AS64500 Example Relay Collective
+
+tort is up. Run applications with:  tort run <command>
 ```
 
-`tort up` verifies before returning, and **tears itself down if it cannot
-confirm** traffic exits through Tor. It will not leave a tunnel up that it
-could not prove works.
+A failure looks like this, and leaves nothing behind:
 
-Applications run as the user who invoked sudo, not as root.
+```console
+$ tort up
+  tor bootstrapped
+UNVERIFIED: the check could not be completed - this is not a pass
+
+Rule counters at the point of failure:
+    iifname "tort0" udp dport 53 counter packets 0 bytes 0 redirect to :9153
+    iifname "tort0" meta l4proto tcp counter packets 0 bytes 0 redirect to :9140
+
+Refusing to leave a tunnel up that could not be verified, so it was torn down.
+```
+
+Zero on a redirect counter means the packets never reached the rule. A non-zero
+counter with no connectivity means something downstream dropped them. Those need
+different fixes, which is why the counters are printed rather than a generic
+failure message.
+
+### `tort status`
+
+```console
+$ tort status
+namespace      : present
+nftables table : present
+tor            : present
+
+tort is up.
+confirmed: traffic from the namespace exits through Tor
+  exit node : 198.51.100.7
+  location  : Bucharest, Bucuresti, Romania
+  operator  : AS64501 Example Hosting Ltd
+```
+
+Every line is measured, not asserted. Presence is read from the kernel, and the
+verdict comes from a request made through the tunnel. Three verdicts are
+possible and kept distinct — `confirmed`, `FAILED`, and `UNVERIFIED` — because
+"could not check" is not "safe":
+
+```console
+$ tort status
+namespace      : present
+nftables table : present
+tor            : absent
+
+tort is in a PARTIAL state. Run `tort down` to clean up.
+```
+
+### `tort run`
+
+Runs the command inside the tunnel, as you, on your terminal:
+
+```console
+$ tort run curl -s https://ifconfig.me
+203.0.113.42
+
+$ tort run firefox --profile /tmp/tort-firefox
+```
+
+### `tort route`
+
+```console
+$ tort route
+
+circuit 7 (general)
+  guard   ExampleGuard         192.0.2.10 (DE)
+  middle  ExampleMiddle        198.51.100.22 (NL)
+  exit    ExampleExit          203.0.113.42 (IS)
+
+circuit 8 (general)
+  guard   ExampleGuard         192.0.2.10 (DE)
+  middle  AnotherMiddle        198.51.100.91 (FR)
+  exit    AnotherExit          203.0.113.77 (RO)
+
+(2 further circuits not shown: still building, or used for directory
+ fetches and onion services rather than for your traffic.)
+
+Tor assigns each connection to one of several circuits and retires them
+continuously, so the exit reported by `tort status` is a snapshot from its
+own request and need not appear above.
+```
+
+The same guard appears in both circuits, which is expected: guards are chosen
+rarely and kept for months, because changing them often is what exposes you.
+
+### `tort onion`
+
+```console
+$ tort onion
+Fetching http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/ ...
+  onion service reachable - .onion resolution and routing work
+```
+
+### `tort down`
+
+Names what it removed, and re-reads the kernel to confirm it went:
+
+```console
+$ tort down
+  removed: namespace
+  removed: nftables table
+  removed: tor instance
+tort is down.
+
+$ tort down
+tort was not up - nothing to do.
+```
+
+### `tort ruleset`
+
+Prints the exact nftables ruleset that `up` would apply, without applying it.
+Needs no privilege, so it is the cheapest way to review what tort does to your
+firewall before letting it near one.
 
 ## Design notes
 
@@ -122,13 +279,26 @@ Because the daemon is long-lived it also fixes by construction the bug torc had
 structurally: connect and disconnect are no longer separate processes with
 separate ideas of the current state.
 
-## Verifying it works
+## Verifying it yourself
 
 `scripts/smoke-test.sh` runs the whole lifecycle as root, snapshots the host
-firewall before and after, and prints the rule counters. A healthy run shows:
+firewall before and after, and prints the rule counters:
 
-```
-traffic test : {"IsTor":true,"IP":"..."}
+```console
+$ sudo ./scripts/smoke-test.sh
+
+=== rule counters (which rules actually matched) ===
+  iifname "tort0" udp dport 53 counter packets 4 bytes 308 redirect to :9153
+  iifname "tort0" meta l4proto tcp counter packets 31 bytes 1860 redirect to :9140
+  iifname "tort0" counter packets 0 bytes 0 drop            # forward chain
+  iifname "tort0" tcp dport 9140 counter packets 31 bytes 1860 accept
+
+=== SUMMARY ===
+tort up      : OK
+traffic test : {"IsTor":true,"IP":"203.0.113.42"}
+onion test   : reachable
+tort down    : exit 0
+leftover     : tort is down.
 firewall     : unchanged - tort left no structural trace
 ```
 
@@ -169,20 +339,9 @@ Two further notes for Chromium-based browsers:
 - **WebRTC cannot leak your address**, because the UDP it needs is dropped. It
   will simply not work.
 
-## Inspecting circuits
+## How circuit inspection works
 
-```bash
-tort route
-```
-
-```
-circuit 5 (general)
-  guard   Unnamed              185.220.101.4 (DE)
-  middle  relayvier            51.15.60.1 (NL)
-  exit    Quintex12            199.195.251.78 (US)
-```
-
-Read over tor's control port, which is bound to **host loopback only** and
+`tort route` reads over tor's control port, which is bound to **host loopback only** and
 authenticated with tor's cookie file. That restriction is the important part:
 an authenticated control connection can reconfigure tor entirely, so a program
 inside the namespace reaching it could uncontain itself. The namespace can
@@ -240,14 +399,10 @@ For the same reason the exit node is described only when the verdict is
 the user's own, and looking it up would mean disclosing it over the connection
 that just failed to be anonymous.
 
-## Onion services
+## How onion routing works
 
-```bash
-tort onion
-```
-
-Fetches the Tor Project's own onion service from inside the namespace. Verified
-working. This exercises a different path from ordinary traffic: tor's `DNSPort`
+`tort onion` fetches the Tor Project's own onion service from inside the
+namespace. This exercises a different path from ordinary traffic: tor's `DNSPort`
 returns a virtual address from `VirtualAddrNetworkIPv4` (`10.192.0.0/10`), and
 the redirect must carry a connection to that address into `TransPort`.
 
@@ -327,6 +482,34 @@ The real confinement is elsewhere, and it is the point of the design: the
 daemon accepts six verbs over a socket, authorizes each one through polkit
 before doing anything, and identifies the caller from the kernel rather than
 from anything the caller claims.
+
+## Troubleshooting
+
+**"the tort daemon is not running, and this is not root"** — start it with
+`sudo systemctl start tortd`, or run the command under `sudo` to use the
+direct path.
+
+**`tort up` succeeds but nothing loads.** Check `tort status` first; if the
+verdict is `confirmed`, tort is working and the problem is in the application.
+If a host firewall is active, see "Coexisting with a host firewall" — tort
+cannot override another table's DROP and will say so.
+
+**A graphical application exits immediately.** It needs a display; tort finds
+`DISPLAY` and `WAYLAND_DISPLAY` from your session automatically, but on a remote
+session there may be none to find.
+
+**`tort status` says PARTIAL.** Something is present and something is missing —
+usually because `tortd` was restarted, which kills the tor instance it started
+while the namespace and rules survive. `tort down` clears it; the daemon also
+cleans up at startup.
+
+**Pages load very slowly on first contact with each host.** QUIC is timing out
+before falling back to TCP. Expected — tor cannot carry UDP, so tort drops it
+rather than letting it leak. `--disable-quic` skips the wait in Chromium-based
+browsers.
+
+**Everything looks right but you want proof.** `sudo ./scripts/smoke-test.sh`
+verifies end to end and diffs your firewall before and after.
 
 ## What this does not cover
 
