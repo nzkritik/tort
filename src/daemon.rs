@@ -20,6 +20,7 @@ use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -231,21 +232,64 @@ static LAST_CHECK: Mutex<Option<(Instant, crate::verify::CheckResult)>> = Mutex:
 /// result from a minute ago still describes the current exit.
 const CHECK_TTL: Duration = Duration::from_secs(60);
 
-/// Verify, or reuse a recent result.
-fn cached_check() -> Option<crate::verify::CheckResult> {
-    let mut cache = LAST_CHECK.lock().unwrap_or_else(|e| e.into_inner());
+/// Set to true while a background refresh is in flight, so a burst of polls
+/// starts one refresh rather than one each.
+static REFRESHING: AtomicBool = AtomicBool::new(false);
 
-    if let Some((made, result)) = cache.as_ref() {
-        if made.elapsed() < CHECK_TTL {
-            return Some(result.clone());
+/// The most recent verification, refreshing in the background when stale.
+///
+/// A status request never waits for Tor. If the cached answer has expired the
+/// stale one is returned and a refresh is started behind it, so the next poll
+/// gets the new value. Blocking instead is what made Disconnect appear to hang:
+/// the daemon serves one request at a time, so a poll that stopped to talk to
+/// check.torproject.org held everything the user did meanwhile - including the
+/// authentication prompt that had not been raised yet.
+///
+/// A slightly stale exit address is a much smaller problem than an interface
+/// that stops responding for several seconds at unpredictable moments.
+fn cached_check() -> Option<crate::verify::CheckResult> {
+    let cached = LAST_CHECK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    match cached {
+        Some((made, result)) if made.elapsed() < CHECK_TTL => Some(result),
+        Some((_, stale)) => {
+            start_refresh();
+            Some(stale)
+        }
+        // Nothing to show yet, so this one has to wait.
+        None => {
+            let fresh = crate::run::verify_in_namespace().ok();
+            if let Some(result) = &fresh {
+                remember_check(result.clone());
+            }
+            fresh
         }
     }
+}
 
-    let fresh = crate::run::verify_in_namespace().ok();
-    if let Some(result) = &fresh {
-        *cache = Some((Instant::now(), result.clone()));
+/// Store a verification as the current answer.
+pub fn remember_check(result: crate::verify::CheckResult) {
+    *LAST_CHECK.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), result));
+}
+
+/// Re-verify off the accept loop.
+///
+/// Safe to do on a thread because the probe re-executes rather than forking: a
+/// forked child of a multi-threaded process would inherit locks held by threads
+/// that do not exist in it.
+fn start_refresh() {
+    if REFRESHING.swap(true, Ordering::SeqCst) {
+        return;
     }
-    fresh
+    std::thread::spawn(|| {
+        if let Ok(result) = crate::run::verify_in_namespace() {
+            remember_check(result);
+        }
+        REFRESHING.store(false, Ordering::SeqCst);
+    });
 }
 
 /// Drop the cached verification, so the next status re-measures.

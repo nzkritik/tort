@@ -8,89 +8,94 @@ use anyhow::{bail, Context, Result};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{execvp, fork, ForkResult, Gid, Uid};
 use std::ffi::CString;
-use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::process::Command;
 
 use crate::netns;
 use crate::verify::{self, CheckResult, Verdict};
 
 /// Run the end-to-end check inside the namespace and bring the result back.
 ///
-/// The child cannot simply return a value - it is a separate process - and an
-/// exit code cannot carry the exit node's address and location. So the child
-/// writes the result as JSON down a pipe and the parent reads it. The parent
-/// stays outside the namespace throughout, which matters because it may be a
-/// daemon that has other callers to serve.
+/// This re-executes tort rather than forking and doing the work in the child.
+/// The distinction matters once the caller may be a thread: a forked child of a
+/// multi-threaded process inherits only the forking thread, but inherits every
+/// lock, including ones held by threads that no longer exist. Building an async
+/// runtime and making TLS connections there is not safe. fork-then-exec is,
+/// because exec discards the inherited memory entirely.
+///
+/// It also means the daemon can refresh its verification on a background thread
+/// without the accept loop waiting for Tor.
 pub fn verify_in_namespace() -> Result<CheckResult> {
-    let (reader, writer) = nix::unistd::pipe().context("creating the result pipe")?;
+    let output = probe("__check")?;
+    serde_json::from_slice(&output).context("the namespace probe returned nothing usable")
+}
 
-    match unsafe { fork() }.context("fork for verification")? {
-        ForkResult::Child => {
-            drop(reader);
-            let result = match netns::enter_with_resolver() {
-                Err(_) => unverified(),
-                Ok(()) => match single_thread_runtime() {
-                    Err(_) => unverified(),
-                    Ok(rt) => rt.block_on(verify::check()),
-                },
-            };
-
-            // A failure to report back is not worth a diagnostic: the parent
-            // treats an empty pipe as unverified, which is the right answer.
-            if let Ok(json) = serde_json::to_string(&result) {
-                let mut f = std::fs::File::from(writer);
-                let _ = f.write_all(json.as_bytes());
-                let _ = f.flush();
-            }
-            std::process::exit(0);
-        }
-        ForkResult::Parent { child } => {
-            drop(writer);
-
-            // Read before waiting. Waiting first would deadlock if the child
-            // ever wrote more than a pipe buffer.
-            let mut json = String::new();
-            let mut f = std::fs::File::from(reader);
-            let _ = f.read_to_string(&mut json);
-            let _ = waitpid(child, None);
-
-            Ok(serde_json::from_str(&json).unwrap_or_else(|_| unverified()))
-        }
+/// Fetch a known onion service from inside the namespace.
+pub fn onion_in_namespace() -> Result<String> {
+    let output = probe("__onion")?;
+    let text = String::from_utf8_lossy(&output).trim().to_string();
+    if text == "ok" {
+        Ok("onion service reachable - .onion resolution and routing work".into())
+    } else {
+        bail!("could not reach the onion service")
     }
+}
+
+/// Run one of tort's hidden probe subcommands and collect its output.
+fn probe(subcommand: &str) -> Result<Vec<u8>> {
+    // /proc/self/exe rather than a name on PATH: the probe must be this exact
+    // binary, not whatever a search happens to find.
+    let output = Command::new("/proc/self/exe")
+        .arg(subcommand)
+        .output()
+        .with_context(|| format!("running the {subcommand} probe"))?;
+
+    if !output.status.success() {
+        bail!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .unwrap_or("the namespace probe failed")
+        );
+    }
+    Ok(output.stdout)
+}
+
+/// The body of `__check`: enter the namespace, verify, print JSON.
+///
+/// Called in a freshly executed process, so it is single-threaded when it enters
+/// the namespace and every thread the runtime later creates inherits it.
+pub fn probe_check() -> ! {
+    let result = match netns::enter_with_resolver() {
+        Err(_) => unverified(),
+        Ok(()) => match single_thread_runtime() {
+            Err(_) => unverified(),
+            Ok(rt) => rt.block_on(verify::check()),
+        },
+    };
+
+    let json = serde_json::to_string(&result).unwrap_or_default();
+    println!("{json}");
+    std::process::exit(0);
+}
+
+/// The body of `__onion`.
+pub fn probe_onion() -> ! {
+    let reachable = netns::enter_with_resolver().is_ok()
+        && single_thread_runtime()
+            .ok()
+            .and_then(|rt| rt.block_on(verify::check_onion()).ok())
+            .map(|status| (200..400).contains(&status))
+            .unwrap_or(false);
+
+    println!("{}", if reachable { "ok" } else { "unreachable" });
+    std::process::exit(0);
 }
 
 /// The safe answer when anything goes wrong: not a pass.
 fn unverified() -> CheckResult {
     CheckResult { verdict: Verdict::Unverified, exit: None }
-}
-
-/// Fetch a known onion service from inside the namespace.
-pub fn onion_in_namespace() -> Result<String> {
-    match unsafe { fork() }.context("fork for the onion check")? {
-        ForkResult::Child => {
-            let code = match netns::enter_with_resolver() {
-                Err(_) => 2,
-                Ok(()) => match single_thread_runtime() {
-                    Err(_) => 2,
-                    Ok(rt) => match rt.block_on(verify::check_onion()) {
-                        Ok(status) if (200..400).contains(&status) => 0,
-                        Ok(_) => 1,
-                        Err(_) => 2,
-                    },
-                },
-            };
-            std::process::exit(code);
-        }
-        ForkResult::Parent { child } => {
-            match waitpid(child, None).context("waiting for the onion check")? {
-                WaitStatus::Exited(_, 0) => {
-                    Ok("onion service reachable - .onion resolution and routing work".into())
-                }
-                WaitStatus::Exited(_, 1) => bail!("the onion service answered, but not with success"),
-                _ => bail!("could not reach the onion service"),
-            }
-        }
-    }
 }
 
 /// A runtime that spawns no worker threads.

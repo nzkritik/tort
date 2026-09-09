@@ -54,6 +54,13 @@ enum Commands {
     /// Run the privileged daemon. Started by systemd, not by hand.
     #[command(hide = true)]
     Daemon,
+    /// Internal: enter the namespace, verify, print JSON. Re-executed by the
+    /// daemon so the work happens in a process that was never multi-threaded.
+    #[command(name = "__check", hide = true)]
+    ProbeCheck,
+    /// Internal: enter the namespace and fetch a known onion service.
+    #[command(name = "__onion", hide = true)]
+    ProbeOnion,
 }
 
 fn main() -> Result<()> {
@@ -67,6 +74,13 @@ fn main() -> Result<()> {
 
     if let Commands::Daemon = cli.command {
         return daemon::serve();
+    }
+
+    // The probes never return: they print and exit.
+    match cli.command {
+        Commands::ProbeCheck => run::probe_check(),
+        Commands::ProbeOnion => run::probe_onion(),
+        _ => {}
     }
 
     let request = match &cli.command {
@@ -84,7 +98,9 @@ fn main() -> Result<()> {
             argv: vec![invoking_user_shell()],
             env: client::session_env(),
         },
-        Commands::Ruleset | Commands::Daemon => unreachable!("handled above"),
+        Commands::Ruleset | Commands::Daemon | Commands::ProbeCheck | Commands::ProbeOnion => {
+            unreachable!("handled above")
+        }
     };
 
     // Two ways to do the work. Through the daemon, polkit decides whether the

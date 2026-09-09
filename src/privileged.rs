@@ -36,6 +36,12 @@ impl DirectRoot {
         self.up(out)?;
 
         let result = crate::run::verify_in_namespace()?;
+
+        // Hand this to the status cache. Without it the next status poll -
+        // seconds away - repeats a verification just made, and blocks the
+        // daemon doing it.
+        crate::daemon::remember_check(result.clone());
+
         if !result.verdict.is_confirmed_safe() {
             // Show which rules matched before the table disappears. A redirect
             // counter of zero means the packet never reached the rule; a
