@@ -35,8 +35,8 @@ impl DirectRoot {
 
         self.up(out)?;
 
-        let verdict = crate::run::verify_in_namespace()?;
-        if !verdict.is_confirmed_safe() {
+        let result = crate::run::verify_in_namespace()?;
+        if !result.verdict.is_confirmed_safe() {
             // Show which rules matched before the table disappears. A redirect
             // counter of zero means the packet never reached the rule; a
             // non-zero counter with no connectivity means something downstream
@@ -46,14 +46,14 @@ impl DirectRoot {
             bail!(
                 "{}\n\nRule counters at the point of failure:\n{}\n\
                  Refusing to leave a tunnel up that could not be verified, so it was torn down.",
-                crate::verify::describe(verdict),
+                crate::verify::describe(result.verdict),
                 counters
             );
         }
 
         Ok(format!(
             "{}\n\ntort is up. Run applications with:  tort run <command>",
-            crate::verify::describe(verdict)
+            crate::verify::describe_result(&result)
         ))
     }
 }

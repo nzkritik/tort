@@ -160,7 +160,7 @@ fn locally(request: Request) -> Result<i32> {
             Ok(0)
         }
         Request::Verify => {
-            println!("  {}", verify::describe(run::verify_in_namespace()?));
+            println!("{}", verify::describe_result(&run::verify_in_namespace()?));
             Ok(0)
         }
         Request::Onion => {
@@ -229,7 +229,7 @@ fn cmd_status() -> Result<()> {
 
     if ns && rules && tor_up {
         println!("\ntort is up.");
-        println!("  {}", verify::describe(run::verify_in_namespace()?));
+        println!("{}", verify::describe_result(&run::verify_in_namespace()?));
     } else if !ns && !rules && !tor_up {
         println!("\ntort is down.");
     } else {

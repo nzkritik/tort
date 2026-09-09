@@ -135,7 +135,7 @@ fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response
         },
         Request::Status => Response::Ok { output: status_text() },
         Request::Verify => match run::verify_in_namespace() {
-            Ok(v) => Response::Ok { output: verify::describe(v).into() },
+            Ok(r) => Response::Ok { output: verify::describe_result(&r) },
             Err(e) => Response::Failed { message: format!("{e:#}") },
         },
         Request::Onion => match run::onion_in_namespace() {
@@ -203,13 +203,20 @@ fn status_text() -> String {
     out.push_str(&format!("namespace      : {}\n", present(ns)));
     out.push_str(&format!("nftables table : {}\n", present(rules)));
     out.push_str(&format!("tor            : {}\n", present(tor_up)));
-    out.push_str(if ns && rules && tor_up {
-        "\ntort is up."
+    if ns && rules && tor_up {
+        out.push_str("\ntort is up.\n");
+        // Measure rather than assert. All three pieces being present says
+        // nothing about whether traffic is actually reaching Tor through them,
+        // and the exit node is what a user actually wants to see.
+        match crate::run::verify_in_namespace() {
+            Ok(result) => out.push_str(&crate::verify::describe_result(&result)),
+            Err(e) => out.push_str(&format!("could not verify: {e:#}")),
+        }
     } else if !ns && !rules && !tor_up {
-        "\ntort is down."
+        out.push_str("\ntort is down.");
     } else {
-        "\ntort is in a PARTIAL state. Run `tort down` to clean up."
-    });
+        out.push_str("\ntort is in a PARTIAL state. Run `tort down` to clean up.");
+    }
     out
 }
 

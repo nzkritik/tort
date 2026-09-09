@@ -168,6 +168,27 @@ Two further notes for Chromium-based browsers:
 - **WebRTC cannot leak your address**, because the UDP it needs is dropped. It
   will simply not work.
 
+### Where the exit node lookup goes
+
+`tort up` and `tort status` report the exit node's address, location and
+operator, looked up from ip2location. **That lookup goes through Tor**, from
+inside the namespace, like every other request tort makes.
+
+This is a requirement rather than an optimisation. Performed over the ordinary
+connection it would tell the provider the user's real address *and* which exit
+node they were using at a known moment - precisely the two facts needed to link
+them, handed over in a single request. Through Tor, the provider sees an exit
+node asking about itself.
+
+The answer is identical either way, since it concerns a third party's address.
+Only the question of who learns something about the user differs, which makes
+the direct version a cost with no benefit.
+
+For the same reason the exit node is described only when the verdict is
+"through Tor". If traffic is *not* going through Tor, the address in question is
+the user's own, and looking it up would mean disclosing it over the connection
+that just failed to be anonymous.
+
 ## Onion services
 
 ```bash

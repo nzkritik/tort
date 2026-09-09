@@ -15,7 +15,7 @@ use std::time::Duration;
 /// Three outcomes, kept distinct on purpose. "Could not check" is not
 /// "confirmed safe", and collapsing the two is how a tool ends up telling
 /// someone they are anonymous when it has no idea.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// check.torproject.org confirmed the connection exits via Tor.
     ThroughTor,
@@ -33,6 +33,43 @@ impl Verdict {
 
 /// Wording for each verdict, kept in one place so the daemon and the local path
 /// cannot drift into describing the same result differently.
+/// Multi-line description of a full check, including the exit node.
+pub fn describe_result(result: &CheckResult) -> String {
+    let mut out = describe(result.verdict).to_string();
+
+    let Some(exit) = &result.exit else { return out };
+
+    if let Some(ip) = &exit.ip {
+        out.push_str(&format!("\n  exit node : {ip}"));
+    }
+
+    let place: Vec<&str> = [&exit.city, &exit.region, &exit.country]
+        .into_iter()
+        .filter_map(|f| f.as_deref())
+        .filter(|f| !f.is_empty())
+        .collect();
+    if !place.is_empty() {
+        out.push_str(&format!("\n  location  : {}", place.join(", ")));
+    }
+
+    if let Some(org) = &exit.org {
+        let asn = exit.asn.as_deref().unwrap_or_default();
+        out.push_str(&format!(
+            "\n  operator  : {}{org}",
+            if asn.is_empty() { String::new() } else { format!("AS{asn} ") }
+        ));
+    }
+
+    // A geo provider that does not recognise the address as a proxy is worth
+    // surfacing: it usually means a recently added exit, and it is the kind of
+    // detail that matters if you are choosing what to do over this circuit.
+    if exit.is_proxy == Some(false) {
+        out.push_str("\n  note      : this provider does not list the address as a known proxy or exit");
+    }
+
+    out
+}
+
 pub fn describe(v: Verdict) -> &'static str {
     match v {
         Verdict::ThroughTor => "confirmed: traffic from the namespace exits through Tor",
@@ -45,18 +82,90 @@ pub fn describe(v: Verdict) -> &'static str {
     }
 }
 
-/// Ask the Tor Project whether this connection exits through Tor.
-///
-/// Must be called with the current thread already inside the namespace.
-pub async fn check() -> Verdict {
-    match query().await {
-        Ok(Some(true)) => Verdict::ThroughTor,
-        Ok(Some(false)) => Verdict::NotThroughTor,
-        _ => Verdict::Unverified,
-    }
+/// What the exit node looks like from the outside.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ExitNode {
+    pub ip: Option<String>,
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub country: Option<String>,
+    pub asn: Option<String>,
+    pub org: Option<String>,
+    /// Whether the geo provider recognises the address as a proxy or exit.
+    pub is_proxy: Option<bool>,
 }
 
-async fn query() -> Result<Option<bool>> {
+/// The result of a check: the verdict, and what we learned about the exit.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CheckResult {
+    pub verdict: Verdict,
+    pub exit: Option<ExitNode>,
+}
+
+/// Ask the Tor Project whether this connection exits through Tor, and describe
+/// the exit node.
+///
+/// Must be called with the current thread already inside the namespace, which
+/// is what makes both requests leave through Tor.
+///
+/// That the geo lookup goes through Tor is a requirement, not an optimisation.
+/// Performed over the ordinary connection it would tell the provider the user's
+/// real address *and* which exit node they are using at a known moment - the
+/// two facts an observer needs to link them. Through Tor, the provider sees an
+/// exit node asking about itself. The answer is identical either way, since it
+/// concerns a third party's address; only the question of who learns something
+/// about the user differs.
+pub async fn check() -> CheckResult {
+    let (verdict, ip) = match query().await {
+        Ok((Some(true), ip)) => (Verdict::ThroughTor, ip),
+        Ok((Some(false), ip)) => (Verdict::NotThroughTor, ip),
+        _ => (Verdict::Unverified, None),
+    };
+
+    // Only describe an exit we actually reached through Tor. Looking up the
+    // address behind a NotThroughTor verdict would mean asking a third party
+    // about the user's own IP, over the very connection that failed to be
+    // anonymous.
+    let exit = match (&verdict, &ip) {
+        (Verdict::ThroughTor, Some(ip)) => Some(exit_node(ip).await),
+        _ => None,
+    };
+
+    CheckResult { verdict, exit }
+}
+
+/// Look up an address with ip2location. Best effort: a failure here degrades the
+/// display, it does not change the verdict.
+async fn exit_node(ip: &str) -> ExitNode {
+    let mut node = ExitNode { ip: Some(ip.to_string()), ..Default::default() };
+
+    let Ok(client) = lookup_client() else { return node };
+    let url = format!("https://api.ip2location.io/?ip={ip}");
+
+    let Ok(response) = client.get(&url).send().await else { return node };
+    let Ok(body) = response.json::<serde_json::Value>().await else { return node };
+
+    let field = |k: &str| body.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    node.city = field("city_name");
+    node.region = field("region_name");
+    node.country = field("country_name");
+    node.org = field("as");
+    node.asn = field("asn");
+    node.is_proxy = body.get("is_proxy").and_then(|v| v.as_bool());
+    node
+}
+
+fn lookup_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("building the lookup client")
+}
+
+/// Returns whether this is Tor, and the address seen from outside.
+async fn query() -> Result<(Option<bool>, Option<String>)> {
     let client = reqwest::Client::builder()
         // No proxy of any kind: the transparent redirect is the thing under
         // test. If this request succeeds via some other path, the test has
@@ -76,7 +185,10 @@ async fn query() -> Result<Option<bool>> {
         .await
         .context("parsing the check.torproject.org response")?;
 
-    Ok(body.get("IsTor").and_then(|v| v.as_bool()))
+    Ok((
+        body.get("IsTor").and_then(|v| v.as_bool()),
+        body.get("IP").and_then(|v| v.as_str()).map(str::to_string),
+    ))
 }
 
 /// The Tor Project's own onion service. Used to test that .onion addresses
@@ -119,5 +231,58 @@ mod tests {
         assert!(!Verdict::Unverified.is_confirmed_safe());
         assert!(!Verdict::NotThroughTor.is_confirmed_safe());
         assert!(Verdict::ThroughTor.is_confirmed_safe());
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+
+    fn node() -> ExitNode {
+        ExitNode {
+            ip: Some("46.102.153.133".into()),
+            city: Some("Sydney".into()),
+            region: Some("New South Wales".into()),
+            country: Some("Australia".into()),
+            asn: Some("9009".into()),
+            org: Some("M247 Europe SRL".into()),
+            is_proxy: Some(true),
+        }
+    }
+
+    #[test]
+    fn describes_the_exit_node_when_confirmed() {
+        let text = describe_result(&CheckResult {
+            verdict: Verdict::ThroughTor,
+            exit: Some(node()),
+        });
+        assert!(text.contains("46.102.153.133"));
+        assert!(text.contains("Sydney, New South Wales, Australia"));
+        assert!(text.contains("AS9009 M247 Europe SRL"));
+    }
+
+    /// The exit node is never described for a failed verdict.
+    ///
+    /// If traffic is not going through Tor, the address in question is the
+    /// user's own - and looking it up would mean telling a third party about it
+    /// over the connection that just failed to be anonymous.
+    #[test]
+    fn says_nothing_about_an_address_when_not_through_tor() {
+        for verdict in [Verdict::NotThroughTor, Verdict::Unverified] {
+            let text = describe_result(&CheckResult { verdict, exit: None });
+            assert!(!text.contains("exit node"));
+            assert!(!text.contains("location"));
+        }
+    }
+
+    #[test]
+    fn missing_geo_fields_are_omitted_not_blank() {
+        let text = describe_result(&CheckResult {
+            verdict: Verdict::ThroughTor,
+            exit: Some(ExitNode { ip: Some("1.2.3.4".into()), ..Default::default() }),
+        });
+        assert!(text.contains("1.2.3.4"));
+        assert!(!text.contains("location"));
+        assert!(!text.contains("operator"));
     }
 }

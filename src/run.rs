@@ -8,34 +8,60 @@ use anyhow::{bail, Context, Result};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{execvp, fork, ForkResult, Gid, Uid};
 use std::ffi::CString;
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use crate::netns;
-use crate::verify::{self, Verdict};
+use crate::verify::{self, CheckResult, Verdict};
 
-/// Run the end-to-end check inside the namespace.
-pub fn verify_in_namespace() -> Result<Verdict> {
+/// Run the end-to-end check inside the namespace and bring the result back.
+///
+/// The child cannot simply return a value - it is a separate process - and an
+/// exit code cannot carry the exit node's address and location. So the child
+/// writes the result as JSON down a pipe and the parent reads it. The parent
+/// stays outside the namespace throughout, which matters because it may be a
+/// daemon that has other callers to serve.
+pub fn verify_in_namespace() -> Result<CheckResult> {
+    let (reader, writer) = nix::unistd::pipe().context("creating the result pipe")?;
+
     match unsafe { fork() }.context("fork for verification")? {
         ForkResult::Child => {
-            let code = match netns::enter_with_resolver() {
-                Err(_) => 2,
+            drop(reader);
+            let result = match netns::enter_with_resolver() {
+                Err(_) => unverified(),
                 Ok(()) => match single_thread_runtime() {
-                    Err(_) => 2,
-                    Ok(rt) => match rt.block_on(verify::check()) {
-                        Verdict::ThroughTor => 0,
-                        Verdict::NotThroughTor => 1,
-                        Verdict::Unverified => 2,
-                    },
+                    Err(_) => unverified(),
+                    Ok(rt) => rt.block_on(verify::check()),
                 },
             };
-            std::process::exit(code);
+
+            // A failure to report back is not worth a diagnostic: the parent
+            // treats an empty pipe as unverified, which is the right answer.
+            if let Ok(json) = serde_json::to_string(&result) {
+                let mut f = std::fs::File::from(writer);
+                let _ = f.write_all(json.as_bytes());
+                let _ = f.flush();
+            }
+            std::process::exit(0);
         }
-        ForkResult::Parent { child } => match waitpid(child, None).context("waiting for check")? {
-            WaitStatus::Exited(_, 0) => Ok(Verdict::ThroughTor),
-            WaitStatus::Exited(_, 1) => Ok(Verdict::NotThroughTor),
-            _ => Ok(Verdict::Unverified),
-        },
+        ForkResult::Parent { child } => {
+            drop(writer);
+
+            // Read before waiting. Waiting first would deadlock if the child
+            // ever wrote more than a pipe buffer.
+            let mut json = String::new();
+            let mut f = std::fs::File::from(reader);
+            let _ = f.read_to_string(&mut json);
+            let _ = waitpid(child, None);
+
+            Ok(serde_json::from_str(&json).unwrap_or_else(|_| unverified()))
+        }
     }
+}
+
+/// The safe answer when anything goes wrong: not a pass.
+fn unverified() -> CheckResult {
+    CheckResult { verdict: Verdict::Unverified, exit: None }
 }
 
 /// Fetch a known onion service from inside the namespace.
