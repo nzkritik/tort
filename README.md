@@ -140,6 +140,38 @@ sudo rm -rf /var/lib/tort
 `tort down` first if a tunnel is up, so the namespace and firewall rules are
 removed while the tool that knows about them is still installed.
 
+## The GUI
+
+```bash
+tortunnel
+```
+
+A GTK4 front end, built automatically when GTK4 is present. Four areas: a top
+bar with connect/disconnect and buttons to run a shell or an application; a
+status panel with a coloured Tor indicator; a list of circuits, each with a
+colour that will match its path on the map; and the map itself, which is not
+drawn yet.
+
+It is **unprivileged**, like the CLI. Every privileged operation goes to the
+daemon and is authorized through polkit, so your desktop's own authentication
+dialog appears when one is needed. Nothing here runs as root — which matters for
+a process that also renders widgets and parses network data.
+
+Three details worth knowing:
+
+- The status indicator has **three** states, not two. "Up but unverified" is
+  shown as its own thing rather than as connected, because the whole design
+  rests on not claiming what has not been measured.
+- **Run shell** launches your terminal emulator running `tort shell`, and
+  **Run app** shells out to `tort run`. The GUI does not reimplement either: the
+  CLI already lends the daemon its terminal, drops to the calling user and
+  performs the browser-handoff check.
+- Circuit colours are paired with the circuit number everywhere they appear, so
+  nothing depends on colour vision.
+
+Requests run on worker threads. `up` takes tens of seconds to bootstrap tor, and
+a GUI that blocks its main loop for that long looks like one that has crashed.
+
 ## Usage
 
 | Command | What it does |
@@ -153,6 +185,7 @@ removed while the tool that knows about them is still installed.
 | `tort onion` | Fetch a known onion service |
 | `tort down` | Remove everything |
 | `tort ruleset` | Print the nftables ruleset without applying it |
+| `tortunnel` | GTK4 graphical front end (see above) |
 
 Commands that change state or enter the namespace are authorized through polkit.
 `status` is not: it reads kernel state and changes nothing, and requiring a

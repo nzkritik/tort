@@ -168,6 +168,17 @@ pub fn report(response: Response) -> i32 {
             0
         }
         Response::Exited { code } => code,
+        // Structured responses are rendered by whichever front end asked; the
+        // CLI formats them itself so the daemon does not have to guess whether
+        // it is talking to a terminal or a widget.
+        Response::Status(report) => {
+            println!("{}", crate::verify::describe_status(&report));
+            0
+        }
+        Response::Circuits { circuits } => {
+            println!("{}", crate::control::describe(&circuits));
+            0
+        }
         Response::Failed { message } => {
             eprintln!("tort: {message}");
             1

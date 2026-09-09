@@ -133,7 +133,7 @@ fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response
             Ok(()) => Response::Ok { output: "tort is down.".into() },
             Err(e) => Response::Failed { message: format!("{e:#}") },
         },
-        Request::Status => Response::Ok { output: status_text() },
+        Request::Status => Response::Status(status_report()),
         Request::Verify => match run::verify_in_namespace() {
             Ok(r) => Response::Ok { output: verify::describe_result(&r) },
             Err(e) => Response::Failed { message: format!("{e:#}") },
@@ -143,7 +143,7 @@ fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response
                 return Response::Failed { message: "tort is not up - run `tort up` first".into() };
             }
             match crate::control::circuits() {
-                Ok(c) => Response::Ok { output: crate::control::describe(&c) },
+                Ok(circuits) => Response::Circuits { circuits },
                 Err(e) => Response::Failed { message: format!("{e:#}") },
             }
         }
@@ -203,34 +203,21 @@ impl std::io::Write for ProgressSink {
     }
 }
 
-fn status_text() -> String {
-    let ns = netns::exists();
+/// Gather status from the kernel, and verify if there is anything to verify.
+fn status_report() -> crate::proto::StatusReport {
+    let namespace = netns::exists();
     let rules = nft::is_installed();
     let tor_up = tor::is_running();
 
-    let mut out = String::new();
-    out.push_str(&format!("namespace      : {}\n", present(ns)));
-    out.push_str(&format!("nftables table : {}\n", present(rules)));
-    out.push_str(&format!("tor            : {}\n", present(tor_up)));
-    if ns && rules && tor_up {
-        out.push_str("\ntort is up.\n");
-        // Measure rather than assert. All three pieces being present says
-        // nothing about whether traffic is actually reaching Tor through them,
-        // and the exit node is what a user actually wants to see.
-        match crate::run::verify_in_namespace() {
-            Ok(result) => out.push_str(&crate::verify::describe_result(&result)),
-            Err(e) => out.push_str(&format!("could not verify: {e:#}")),
-        }
-    } else if !ns && !rules && !tor_up {
-        out.push_str("\ntort is down.");
+    // Measure rather than assert. All three pieces being present says nothing
+    // about whether traffic actually reaches Tor through them.
+    let check = if namespace && rules && tor_up {
+        crate::run::verify_in_namespace().ok()
     } else {
-        out.push_str("\ntort is in a PARTIAL state. Run `tort down` to clean up.");
-    }
-    out
-}
+        None
+    };
 
-fn present(b: bool) -> &'static str {
-    if b { "present" } else { "absent" }
+    crate::proto::StatusReport { namespace, rules, tor: tor_up, check }
 }
 
 fn reply(mut stream: &UnixStream, response: &Response) -> Result<()> {

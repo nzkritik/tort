@@ -9,11 +9,28 @@ fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The GUI needs GTK4, which a headless machine running only the daemon should
+# not have to install. Build it when the toolkit is there, skip it when not.
+FEATURES=""
+if pkg-config --exists gtk4 2>/dev/null; then
+    echo "GTK4 found - the tortunnel GUI will be built."
+    FEATURES="--features gui"
+else
+    echo "GTK4 not found - building the CLI and daemon only."
+fi
+
 echo "Building..."
-sudo -u "${SUDO_USER:-root}" cargo build --release --manifest-path "$REPO/Cargo.toml"
+sudo -u "${SUDO_USER:-root}" cargo build --release $FEATURES --manifest-path "$REPO/Cargo.toml"
 
 echo "Installing binary..."
 install -Dm755 "$REPO/target/release/tort" /usr/local/bin/tort
+
+if [ -x "$REPO/target/release/tortunnel" ]; then
+    echo "Installing GUI..."
+    install -Dm755 "$REPO/target/release/tortunnel" /usr/local/bin/tortunnel
+    install -Dm644 "$REPO/packaging/tortunnel.desktop" \
+        /usr/share/applications/tortunnel.desktop
+fi
 
 echo "Installing polkit policy..."
 install -Dm644 "$REPO/packaging/io.github.nzkritik.tort.policy" \
@@ -44,3 +61,7 @@ echo "Then, as your normal user and with no sudo:"
 echo "  tort up"
 echo "  tort run brave --user-data-dir=/tmp/tort-brave"
 echo "  tort down"
+if [ -x /usr/local/bin/tortunnel ]; then
+    echo
+    echo "Or launch the GUI:  tortunnel"
+fi

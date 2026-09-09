@@ -9,18 +9,7 @@
 //! Safety is a consequence of the topology rather than of a rule remembering to
 //! be there.
 
-mod client;
-mod config;
-mod control;
-mod daemon;
-mod netns;
-mod nft;
-mod polkit;
-mod privileged;
-mod proto;
-mod run;
-mod tor;
-mod verify;
+use tort::{client, config, control, daemon, netns, nft, privileged, proto, run, tor, verify};
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
@@ -160,7 +149,7 @@ fn locally(request: Request) -> Result<i32> {
         },
         Request::Down => cmd_down().map(|_| 0),
         Request::Status => {
-            cmd_status()?;
+            println!("{}", verify::describe_status(&local_status()));
             Ok(0)
         }
         Request::Verify => {
@@ -229,28 +218,21 @@ fn cmd_down() -> Result<()> {
     Ok(())
 }
 
-fn cmd_status() -> Result<()> {
-    let ns = netns::exists();
+/// The same report the daemon builds, gathered in this process.
+///
+/// Both paths produce a StatusReport and both render it with the same
+/// function, so the direct and daemon paths cannot describe the same system
+/// differently.
+fn local_status() -> proto::StatusReport {
+    let namespace = netns::exists();
     let rules = nft::is_installed();
     let tor_up = tor::is_running();
-
-    println!("namespace      : {}", yes_no(ns));
-    println!("nftables table : {}", yes_no(rules));
-    println!("tor            : {}", yes_no(tor_up));
-
-    if ns && rules && tor_up {
-        println!("\ntort is up.");
-        println!("{}", verify::describe_result(&run::verify_in_namespace()?));
-    } else if !ns && !rules && !tor_up {
-        println!("\ntort is down.");
+    let check = if namespace && rules && tor_up {
+        run::verify_in_namespace().ok()
     } else {
-        println!("\ntort is in a PARTIAL state. Run `tort down` to clean up.");
-    }
-    Ok(())
-}
-
-fn yes_no(b: bool) -> &'static str {
-    if b { "present" } else { "absent" }
+        None
+    };
+    proto::StatusReport { namespace, rules, tor: tor_up, check }
 }
 
 fn print_firewall_hint() {

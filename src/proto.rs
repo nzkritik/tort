@@ -77,6 +77,36 @@ impl Request {
     }
 }
 
+/// What the daemon found when asked for status.
+///
+/// Structured rather than pre-rendered text. The daemon should report what is
+/// true and let each front end decide how to show it: the CLI prints lines, the
+/// GUI colours an indicator, and neither has to parse the other's prose.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusReport {
+    pub namespace: bool,
+    pub rules: bool,
+    pub tor: bool,
+    /// Present only when all three pieces are, since there is nothing to verify
+    /// otherwise.
+    pub check: Option<crate::verify::CheckResult>,
+}
+
+impl StatusReport {
+    pub fn is_up(&self) -> bool {
+        self.namespace && self.rules && self.tor
+    }
+
+    pub fn is_down(&self) -> bool {
+        !self.namespace && !self.rules && !self.tor
+    }
+
+    /// Neither fully up nor fully down - something needs cleaning up.
+    pub fn is_partial(&self) -> bool {
+        !self.is_up() && !self.is_down()
+    }
+}
+
 /// One response, sent as a single JSON line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -89,4 +119,8 @@ pub enum Response {
     Denied { message: String },
     /// A command finished with this exit status.
     Exited { code: i32 },
+    /// Structured status.
+    Status(StatusReport),
+    /// The circuits tor has built.
+    Circuits { circuits: Vec<crate::control::Circuit> },
 }

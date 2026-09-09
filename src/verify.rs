@@ -69,6 +69,31 @@ pub fn describe_result(result: &CheckResult) -> String {
     out
 }
 
+/// Render a status report as lines for a terminal.
+pub fn describe_status(report: &crate::proto::StatusReport) -> String {
+    let yes_no = |b: bool| if b { "present" } else { "absent" };
+
+    let mut out = format!(
+        "namespace      : {}\nnftables table : {}\ntor            : {}\n",
+        yes_no(report.namespace),
+        yes_no(report.rules),
+        yes_no(report.tor)
+    );
+
+    if report.is_up() {
+        out.push_str("\ntort is up.\n");
+        match &report.check {
+            Some(check) => out.push_str(&describe_result(check)),
+            None => out.push_str("could not verify"),
+        }
+    } else if report.is_down() {
+        out.push_str("\ntort is down.");
+    } else {
+        out.push_str("\ntort is in a PARTIAL state. Run `tort down` to clean up.");
+    }
+    out
+}
+
 pub fn describe(v: Verdict) -> &'static str {
     match v {
         Verdict::ThroughTor => "confirmed: traffic from the namespace exits through Tor",

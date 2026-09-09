@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=tortunnel
+GenericName=Tor Tunnel
+Comment=Run applications inside a network namespace whose only route out is Tor
+Exec=tortunnel
+Icon=network-vpn
+Terminal=false
+Categories=Network;Security;
+Keywords=tor;privacy;anonymity;proxy;

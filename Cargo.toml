@@ -16,6 +16,25 @@ serde_json = "1.0"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# GUI only.
+gtk4 = { version = "0.9", optional = true }
+async-channel = { version = "2", optional = true }
+
+[lib]
+name = "tort"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tort"
 path = "src/main.rs"
+
+# The GUI is optional: a headless machine running only the daemon should not
+# need GTK to build it.
+[[bin]]
+name = "tortunnel"
+path = "src/bin/tortunnel.rs"
+required-features = ["gui"]
+
+[features]
+default = []
+gui = ["dep:gtk4", "dep:async-channel"]
