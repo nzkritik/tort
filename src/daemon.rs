@@ -20,6 +20,8 @@ use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::config::SOCKET_PATH;
 use crate::polkit::{self, Decision};
@@ -98,13 +100,14 @@ fn handle(stream: UnixStream) -> Result<()> {
         // it happens whenever something is checking whether we are listening.
         return Ok(());
     };
-    let request: Request = serde_json::from_str(&line)
+    let envelope: crate::proto::Envelope = serde_json::from_str(&line)
         .context("the client sent a malformed request")?;
+    let request = envelope.request;
 
     eprintln!("tortd: uid={uid} pid={pid} requests: {}", request.describe());
 
     if let Some(action) = request.polkit_action() {
-        match polkit::check(action, pid, uid)? {
+        match polkit::check(action, pid, uid, envelope.interactive)? {
             Decision::Allowed => {}
             Decision::Denied(reason) => {
                 eprintln!("tortd: denied uid={uid}: {reason}");
@@ -123,21 +126,30 @@ fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response
             // Progress goes to the caller's own terminal when they lent it to
             // us, and to the journal otherwise, so a `tort up` triggered by
             // something without a terminal still leaves a record.
+            invalidate_check();
             let mut out = ProgressSink::new(fds.get(1));
             match DirectRoot.up_and_verify(&mut out) {
                 Ok(output) => Response::Ok { output },
                 Err(e) => Response::Failed { message: format!("{e:#}") },
             }
         }
-        Request::Down => match DirectRoot.down() {
-            Ok(()) => Response::Ok { output: "tort is down.".into() },
-            Err(e) => Response::Failed { message: format!("{e:#}") },
-        },
+        Request::Down => {
+            invalidate_check();
+            match DirectRoot.down() {
+                Ok(()) => Response::Ok { output: "tort is down.".into() },
+                Err(e) => Response::Failed { message: format!("{e:#}") },
+            }
+        }
         Request::Status => Response::Status(status_report()),
-        Request::Verify => match run::verify_in_namespace() {
-            Ok(r) => Response::Ok { output: verify::describe_result(&r) },
-            Err(e) => Response::Failed { message: format!("{e:#}") },
-        },
+        Request::Verify => {
+            // An explicit verify always measures afresh: the user asked, so a
+            // minute-old answer is not what they wanted.
+            invalidate_check();
+            match run::verify_in_namespace() {
+                Ok(r) => Response::Ok { output: verify::describe_result(&r) },
+                Err(e) => Response::Failed { message: format!("{e:#}") },
+            }
+        }
         Request::Route => {
             if !DirectRoot.is_up() {
                 return Response::Failed { message: "tort is not up - run `tort up` first".into() };
@@ -203,6 +215,47 @@ impl std::io::Write for ProgressSink {
     }
 }
 
+/// The most recent verification, and when it was made.
+///
+/// Verifying costs two HTTP round trips through Tor - several seconds - and the
+/// daemon serves one request at a time. Without this, a status poll every ten
+/// seconds keeps the daemon busy for a large fraction of its life, and anything
+/// the user does meanwhile waits behind it: clicking Disconnect appeared to do
+/// nothing for several seconds because its authentication prompt could not be
+/// raised until a poll finished talking to check.torproject.org.
+///
+/// It is also what keeps the exit-node lookups inside a free API's daily quota.
+static LAST_CHECK: Mutex<Option<(Instant, crate::verify::CheckResult)>> = Mutex::new(None);
+
+/// How long a verification stays good for. Circuits persist for minutes, so a
+/// result from a minute ago still describes the current exit.
+const CHECK_TTL: Duration = Duration::from_secs(60);
+
+/// Verify, or reuse a recent result.
+fn cached_check() -> Option<crate::verify::CheckResult> {
+    let mut cache = LAST_CHECK.lock().unwrap_or_else(|e| e.into_inner());
+
+    if let Some((made, result)) = cache.as_ref() {
+        if made.elapsed() < CHECK_TTL {
+            return Some(result.clone());
+        }
+    }
+
+    let fresh = crate::run::verify_in_namespace().ok();
+    if let Some(result) = &fresh {
+        *cache = Some((Instant::now(), result.clone()));
+    }
+    fresh
+}
+
+/// Drop the cached verification, so the next status re-measures.
+///
+/// Called whenever the tunnel changes: a result from before a reconnection
+/// describes a tunnel that no longer exists.
+fn invalidate_check() {
+    *LAST_CHECK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Gather status from the kernel, and verify if there is anything to verify.
 fn status_report() -> crate::proto::StatusReport {
     let namespace = netns::exists();
@@ -212,7 +265,7 @@ fn status_report() -> crate::proto::StatusReport {
     // Measure rather than assert. All three pieces being present says nothing
     // about whether traffic actually reaches Tor through them.
     let check = if namespace && rules && tor_up {
-        crate::run::verify_in_namespace().ok()
+        cached_check()
     } else {
         None
     };

@@ -9,6 +9,20 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A request plus how it may be authorized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub request: Request,
+    /// May polkit stop and ask the user for a password?
+    ///
+    /// True for something the user just clicked or typed; false for background
+    /// polling. A poll that could raise an authentication dialog would put one
+    /// on screen out of nowhere, seconds after the user did something
+    /// unrelated - and worse, it would hold the daemon while the dialog waited
+    /// for an answer nobody had asked for.
+    pub interactive: bool,
+}
+
 /// One request, sent as a single JSON line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]

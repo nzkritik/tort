@@ -22,24 +22,23 @@ pub enum Decision {
 /// connecting could otherwise have its pid taken by an unrelated - possibly
 /// more privileged - process before polkit looks at it. The start time comes
 /// from the same /proc entry and pins the identity to one specific process.
-pub fn check(action: &str, pid: i32, uid: u32) -> Result<Decision> {
+pub fn check(action: &str, pid: i32, uid: u32, interactive: bool) -> Result<Decision> {
     let start_time = process_start_time(pid)
         .with_context(|| format!("reading the start time of pid {pid}"))?;
 
     let subject = format!("{pid},{start_time},{uid}");
 
-    let output = Command::new("pkcheck")
-        .args([
-            "--action-id",
-            action,
-            "--process",
-            &subject,
-            // Let polkit prompt the user through their session agent. Without
-            // this a policy of auth_admin_keep can only ever be refused.
-            "--allow-user-interaction",
-        ])
-        .output()
-        .context("running pkcheck - is polkit installed?")?;
+    let mut command = Command::new("pkcheck");
+    command.args(["--action-id", action, "--process", &subject]);
+
+    if interactive {
+        // Let polkit prompt through the session agent. Without this a policy of
+        // auth_admin_keep can only ever be refused. It also blocks until the
+        // user answers, which is why background polls must not set it.
+        command.arg("--allow-user-interaction");
+    }
+
+    let output = command.output().context("running pkcheck - is polkit installed?")?;
 
     if output.status.success() {
         Ok(Decision::Allowed)

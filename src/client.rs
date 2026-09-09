@@ -114,8 +114,14 @@ pub fn connect() -> Option<UnixStream> {
 ///
 /// `stdio` is passed for `Run`: the daemon has no terminal of its own, so the
 /// caller lends it these descriptors over SCM_RIGHTS.
-pub fn send(stream: &UnixStream, request: &Request, stdio: Option<[RawFd; 3]>) -> Result<Response> {
-    let mut line = serde_json::to_string(request)?;
+pub fn send(
+    stream: &UnixStream,
+    request: &Request,
+    stdio: Option<[RawFd; 3]>,
+    interactive: bool,
+) -> Result<Response> {
+    let envelope = crate::proto::Envelope { request: request.clone(), interactive };
+    let mut line = serde_json::to_string(&envelope)?;
     line.push('\n');
 
     match stdio {

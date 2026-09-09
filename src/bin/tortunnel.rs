@@ -414,7 +414,11 @@ fn refresh(sender: async_channel::Sender<Update>) {
 /// A read-only query: no busy state, no activity text on success.
 fn spawn_query(sender: async_channel::Sender<Update>, request: Request) {
     std::thread::spawn(move || {
-        let update = match send(&request, None) {
+        // Not interactive. A poll must never raise an authentication dialog:
+        // one appearing out of nowhere seconds after an unrelated action is
+        // baffling, and while it waited for an answer the daemon would be held
+        // and everything the user actually asked for would queue behind it.
+        let update = match send(&request, None, false) {
             Ok(Response::Status(report)) => Update::Status(Box::new(report)),
             Ok(Response::Circuits { circuits }) => Update::Circuits(circuits),
             // A refused or failed poll is not worth interrupting the user over;
@@ -466,7 +470,9 @@ fn spawn_request(sender: async_channel::Sender<Update>, request: Request) {
             _ => None,
         };
 
-        let outcome = send(&request, stdio);
+        // Interactive: the user clicked something and is waiting, so polkit may
+        // ask them for a password.
+        let outcome = send(&request, stdio, true);
 
         // Close our copy of the write end so the reader thread sees EOF and
         // stops, rather than lingering for the life of the application.
@@ -489,10 +495,10 @@ fn spawn_request(sender: async_channel::Sender<Update>, request: Request) {
     });
 }
 
-fn send(request: &Request, stdio: Option<[RawFd; 3]>) -> anyhow::Result<Response> {
+fn send(request: &Request, stdio: Option<[RawFd; 3]>, interactive: bool) -> anyhow::Result<Response> {
     let stream = tort::client::connect()
         .ok_or_else(|| anyhow::anyhow!("the tort daemon is not running (systemctl start tortd)"))?;
-    tort::client::send(&stream, request, stdio)
+    tort::client::send(&stream, request, stdio, interactive)
 }
 
 fn apply_status(

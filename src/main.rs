@@ -119,7 +119,9 @@ fn via_daemon(stream: &std::os::unix::net::UnixStream, request: Request) -> Resu
     };
 
     let is_up = matches!(request, Request::Up);
-    let response = client::send(stream, &request, stdio)?;
+    // Always interactive: a person typed this command and is waiting, so
+    // polkit may stop and ask them for a password.
+    let response = client::send(stream, &request, stdio, true)?;
 
     // The firewall hint is worth showing on a failed `up`, since a host
     // firewall dropping the redirected traffic is the one failure tort cannot
