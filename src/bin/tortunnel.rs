@@ -146,25 +146,51 @@ fn build_ui(app: &Application) {
     left.set_margin_start(12);
     left.append(&status_frame);
     left.append(&circuit_frame);
-    left.set_size_request(420, -1);
+    // Enough for the longest status line and no more; the map takes the rest.
+    left.set_size_request(340, -1);
 
     // --- right: the map -----------------------------------------------------
     // Circuits are shared with the draw function, which runs on the main loop
     // and so cannot race with the update that replaces them.
     let drawn_circuits: Rc<RefCell<Vec<Circuit>>> = Rc::new(RefCell::new(Vec::new()));
 
+    // 1.0 means "fit the circuits exactly"; larger magnifies about that centre.
+    let zoom = Rc::new(RefCell::new(1.0_f64));
+
     let map_area = gtk::DrawingArea::new();
     map_area.set_hexpand(true);
     map_area.set_vexpand(true);
     {
         let drawn = drawn_circuits.clone();
+        let zoom = zoom.clone();
         map_area.set_draw_func(move |area, cr, width, height| {
-            draw_map(area, cr, width, height, &drawn.borrow());
+            draw_map(area, cr, width, height, &drawn.borrow(), *zoom.borrow());
         });
     }
 
+    let zoom_in = gtk::Button::from_icon_name("zoom-in-symbolic");
+    let zoom_out = gtk::Button::from_icon_name("zoom-out-symbolic");
+    let zoom_fit = gtk::Button::from_icon_name("zoom-fit-best-symbolic");
+    zoom_in.set_tooltip_text(Some("Zoom in  (+)"));
+    zoom_out.set_tooltip_text(Some("Zoom out  (−)"));
+    zoom_fit.set_tooltip_text(Some("Fit the circuits  (0)"));
+
+    let zoom_box = gtk::Box::new(Orientation::Horizontal, 0);
+    zoom_box.add_css_class("linked");
+    zoom_box.append(&zoom_out);
+    zoom_box.append(&zoom_fit);
+    zoom_box.append(&zoom_in);
+    zoom_box.set_halign(gtk::Align::End);
+    zoom_box.set_valign(gtk::Align::End);
+    zoom_box.set_margin_end(12);
+    zoom_box.set_margin_bottom(12);
+
+    let map_overlay = gtk::Overlay::new();
+    map_overlay.set_child(Some(&map_area));
+    map_overlay.add_overlay(&zoom_box);
+
     let map_frame = gtk::Frame::new(Some("Route map"));
-    map_frame.set_child(Some(&map_area));
+    map_frame.set_child(Some(&map_overlay));
     map_frame.set_hexpand(true);
     map_frame.set_vexpand(true);
     map_frame.set_margin_top(12);
@@ -175,7 +201,12 @@ fn build_ui(app: &Application) {
     let panes = gtk::Paned::new(Orientation::Horizontal);
     panes.set_start_child(Some(&left));
     panes.set_end_child(Some(&map_frame));
-    panes.set_position(440);
+    panes.set_position(340);
+    // Growing the window grows the map. The status and circuit panels have a
+    // natural width and gain nothing from more of it.
+    panes.set_resize_start_child(false);
+    panes.set_resize_end_child(true);
+    panes.set_shrink_start_child(false);
 
     // --- activity line ------------------------------------------------------
     let activity = gtk::Label::new(Some("Connecting to the tort daemon…"));
@@ -282,6 +313,72 @@ fn build_ui(app: &Application) {
                 }
             }
         });
+    }
+
+    // --- zoom ---------------------------------------------------------------
+    let apply_zoom = {
+        let zoom = zoom.clone();
+        let map_area = map_area.clone();
+        move |factor: f64| {
+            let mut z = zoom.borrow_mut();
+            // Clamped so the view cannot be zoomed into meaninglessness, or out
+            // so far the world becomes a dot.
+            *z = (*z * factor).clamp(0.4, 20.0);
+            drop(z);
+            map_area.queue_draw();
+        }
+    };
+
+    {
+        let apply = apply_zoom.clone();
+        zoom_in.connect_clicked(move |_| apply(1.4));
+    }
+    {
+        let apply = apply_zoom.clone();
+        zoom_out.connect_clicked(move |_| apply(1.0 / 1.4));
+    }
+    {
+        let zoom = zoom.clone();
+        let map_area = map_area.clone();
+        zoom_fit.connect_clicked(move |_| {
+            *zoom.borrow_mut() = 1.0;
+            map_area.queue_draw();
+        });
+    }
+
+    // Keyboard: + and - to zoom, 0 to fit. Accepts the shifted and keypad forms
+    // too, since "+" is shift-equals on most layouts and nobody wants to think
+    // about that.
+    {
+        let apply = apply_zoom.clone();
+        let zoom = zoom.clone();
+        let map_area = map_area.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            use gtk::gdk::Key;
+            match key {
+                Key::plus | Key::equal | Key::KP_Add => apply(1.4),
+                Key::minus | Key::underscore | Key::KP_Subtract => apply(1.0 / 1.4),
+                Key::_0 | Key::KP_0 => {
+                    *zoom.borrow_mut() = 1.0;
+                    map_area.queue_draw();
+                }
+                _ => return glib::Propagation::Proceed,
+            }
+            glib::Propagation::Stop
+        });
+        window.add_controller(keys);
+    }
+
+    // Scrolling over the map zooms it, which is what everyone tries first.
+    {
+        let apply = apply_zoom.clone();
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        scroll.connect_scroll(move |_, _, dy| {
+            apply(if dy < 0.0 { 1.15 } else { 1.0 / 1.15 });
+            glib::Propagation::Stop
+        });
+        map_area.add_controller(scroll);
     }
 
     // Poll for status and circuits.
@@ -599,24 +696,48 @@ fn spawn_detached(command: &str) {
 
 /// Paint the world and the circuit paths over it.
 ///
-/// Colours are read from the widget's own style context rather than hardcoded,
-/// so the map follows the desktop's light or dark theme instead of being a pale
-/// rectangle in a dark window.
+/// The view frames the circuits rather than the globe: once relays are known the
+/// map fits their bounding box, so the interesting part fills the pane instead
+/// of being three dots on a world map. With no circuits it falls back to the
+/// whole world.
+///
+/// Colours are read from the widget's style context, so the map follows the
+/// desktop's light or dark theme rather than being a pale rectangle in a dark
+/// window.
 fn draw_map(
     area: &gtk::DrawingArea,
     cr: &gtk::cairo::Context,
     width: i32,
     height: i32,
     circuits: &[Circuit],
+    zoom: f64,
 ) {
-    use tort::map::{world, Projection};
+    use tort::map::{world, Bounds, Projection};
 
     let (w, h) = (width as f64, height as f64);
-    let projection = Projection::fit(w, h);
     let world = world();
 
-    // The widget's foreground colour, so the map follows the desktop theme
-    // rather than being a pale rectangle in a dark window.
+    let general: Vec<&Circuit> = circuits
+        .iter()
+        .filter(|c| c.purpose == "GENERAL" && c.state == "BUILT")
+        .collect();
+
+    // Every located hop of every circuit, which is what the view should frame.
+    let located: Vec<[f64; 2]> = general
+        .iter()
+        .flat_map(|c| c.hops.iter())
+        .filter_map(|hop| hop.country.as_deref())
+        .filter_map(|c| world.locate(c))
+        .collect();
+
+    let bounds = Bounds::around(&located)
+        // A generous margin, and a floor of 40 degrees: relays in one country
+        // should still be shown in a recognisable part of the world.
+        .map(|b| b.padded(0.45, 40.0))
+        .unwrap_or_else(Bounds::world);
+
+    let projection = Projection::new(&bounds, w, h, zoom);
+
     let fg = area.style_context().color();
     let dim = |alpha: f64| (fg.red() as f64, fg.green() as f64, fg.blue() as f64, alpha);
 
@@ -625,23 +746,28 @@ fn draw_map(
     cr.set_source_rgba(r, g, b, a);
     cr.set_line_width(0.7);
     for ring in &world.rings {
-        let mut points = ring.iter();
-        if let Some(first) = points.next() {
-            let (x, y) = projection.project(first[0], first[1]);
-            cr.move_to(x, y);
-            for point in points {
-                let (x, y) = projection.project(point[0], point[1]);
+        let mut started = false;
+        let mut previous_lon = 0.0_f64;
+
+        for point in ring {
+            let (lon, lat) = (point[0], point[1]);
+            let (x, y) = projection.project(lon, lat);
+
+            // A ring crossing the edge of the view would otherwise be drawn as a
+            // horizontal streak straight across the map, because consecutive
+            // points land on opposite sides. Break the path instead.
+            let wrapped = started && (projection.wrap(lon) - projection.wrap(previous_lon)).abs() > 180.0;
+
+            if !started || wrapped {
+                cr.move_to(x, y);
+                started = true;
+            } else {
                 cr.line_to(x, y);
             }
-            cr.close_path();
+            previous_lon = lon;
         }
     }
     let _ = cr.stroke();
-
-    let general: Vec<&Circuit> = circuits
-        .iter()
-        .filter(|c| c.purpose == "GENERAL" && c.state == "BUILT")
-        .collect();
 
     if general.is_empty() {
         let (r, g, b, a) = dim(0.5);
@@ -680,7 +806,7 @@ fn draw_map(
         }
         let _ = cr.stroke();
 
-        // Hops. The exit is drawn larger and filled, because it is the one the
+        // Hops. The exit is drawn larger and haloed, because it is the one the
         // outside world sees and the one the status panel names.
         let last = points.len() - 1;
         for (i, (x, y)) in points.iter().enumerate() {

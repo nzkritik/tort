@@ -157,6 +157,26 @@ Bootstrap progress reaches the window through the same mechanism the CLI uses:
 the daemon writes progress to the stdout its caller lends it, and the GUI lends
 it a pipe instead of a terminal. No special case in the daemon.
 
+### The map
+
+Once circuits are known the view frames **them** rather than the globe, so the
+interesting part fills the pane instead of being three dots on a world map. With
+no circuits it falls back to the whole world.
+
+| Control | Action |
+|---|---|
+| `+` / `=` | Zoom in |
+| `-` | Zoom out |
+| `0` | Fit the circuits |
+| Scroll wheel | Zoom |
+| Buttons, lower right | The same three |
+
+A circuit crossing the Pacific frames the Pacific rather than zooming out to the
+whole globe: longitudes are measured both as given and shifted past 180°, and
+whichever gives the narrower span wins. Country outlines that cross the edge of
+the view have their paths broken rather than being drawn as a streak across the
+map.
+
 It is **unprivileged**, like the CLI. Every privileged operation goes to the
 daemon and is authorized through polkit, so your desktop's own authentication
 dialog appears when one is needed. Nothing here runs as root — which matters for
