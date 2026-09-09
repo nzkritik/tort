@@ -9,6 +9,7 @@ pub mod client;
 pub mod config;
 pub mod control;
 pub mod daemon;
+pub mod map;
 pub mod netns;
 pub mod nft;
 pub mod polkit;

@@ -148,17 +148,23 @@ fn build_ui(app: &Application) {
     left.append(&circuit_frame);
     left.set_size_request(420, -1);
 
-    // --- right: map, deliberately empty for now -----------------------------
-    let map_placeholder = gtk::Label::new(Some(
-        "Map\n\nCircuit paths will be drawn here.\n\
-         Relay locations come from tor's own GeoIP database,\n\
-         so inspecting a circuit tells no third party your path.",
-    ));
-    map_placeholder.set_justify(gtk::Justification::Center);
-    map_placeholder.add_css_class("dim-label");
+    // --- right: the map -----------------------------------------------------
+    // Circuits are shared with the draw function, which runs on the main loop
+    // and so cannot race with the update that replaces them.
+    let drawn_circuits: Rc<RefCell<Vec<Circuit>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let map_area = gtk::DrawingArea::new();
+    map_area.set_hexpand(true);
+    map_area.set_vexpand(true);
+    {
+        let drawn = drawn_circuits.clone();
+        map_area.set_draw_func(move |area, cr, width, height| {
+            draw_map(area, cr, width, height, &drawn.borrow());
+        });
+    }
 
     let map_frame = gtk::Frame::new(Some("Route map"));
-    map_frame.set_child(Some(&map_placeholder));
+    map_frame.set_child(Some(&map_area));
     map_frame.set_hexpand(true);
     map_frame.set_vexpand(true);
     map_frame.set_margin_top(12);
@@ -231,6 +237,8 @@ fn build_ui(app: &Application) {
         let detail_label = detail_label.clone();
         let progress_label = progress_label.clone();
         let circuit_list = circuit_list.clone();
+        let map_area = map_area.clone();
+        let drawn_circuits = drawn_circuits.clone();
         let connect_button = connect_button.clone();
         let activity = activity.clone();
         let spinner = spinner.clone();
@@ -247,7 +255,11 @@ fn build_ui(app: &Application) {
                         progress_label.set_text(&line);
                         progress_label.set_visible(true);
                     }
-                    Update::Circuits(circuits) => show_circuits(&circuit_list, &circuits),
+                    Update::Circuits(circuits) => {
+                        show_circuits(&circuit_list, &circuits);
+                        *drawn_circuits.borrow_mut() = circuits;
+                        map_area.queue_draw();
+                    }
                     Update::Done(text) => activity.set_text(&text),
                     Update::Failed(message) => {
                         activity.set_text(&format!("Failed: {message}"));
@@ -583,4 +595,115 @@ fn which(program: &str) -> bool {
 /// performs the browser-handoff check, none of which should be reimplemented.
 fn spawn_detached(command: &str) {
     let _ = std::process::Command::new("sh").arg("-c").arg(command).spawn();
+}
+
+/// Paint the world and the circuit paths over it.
+///
+/// Colours are read from the widget's own style context rather than hardcoded,
+/// so the map follows the desktop's light or dark theme instead of being a pale
+/// rectangle in a dark window.
+fn draw_map(
+    area: &gtk::DrawingArea,
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    circuits: &[Circuit],
+) {
+    use tort::map::{world, Projection};
+
+    let (w, h) = (width as f64, height as f64);
+    let projection = Projection::fit(w, h);
+    let world = world();
+
+    // The widget's foreground colour, so the map follows the desktop theme
+    // rather than being a pale rectangle in a dark window.
+    let fg = area.style_context().color();
+    let dim = |alpha: f64| (fg.red() as f64, fg.green() as f64, fg.blue() as f64, alpha);
+
+    // Land outlines, faint: they are a backdrop for the paths, not the subject.
+    let (r, g, b, a) = dim(0.28);
+    cr.set_source_rgba(r, g, b, a);
+    cr.set_line_width(0.7);
+    for ring in &world.rings {
+        let mut points = ring.iter();
+        if let Some(first) = points.next() {
+            let (x, y) = projection.project(first[0], first[1]);
+            cr.move_to(x, y);
+            for point in points {
+                let (x, y) = projection.project(point[0], point[1]);
+                cr.line_to(x, y);
+            }
+            cr.close_path();
+        }
+    }
+    let _ = cr.stroke();
+
+    let general: Vec<&Circuit> = circuits
+        .iter()
+        .filter(|c| c.purpose == "GENERAL" && c.state == "BUILT")
+        .collect();
+
+    if general.is_empty() {
+        let (r, g, b, a) = dim(0.5);
+        cr.set_source_rgba(r, g, b, a);
+        cr.select_font_face("sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Normal);
+        cr.set_font_size(13.0);
+        cr.move_to(16.0, h - 16.0);
+        let _ = cr.show_text("No circuits carrying traffic yet.");
+        return;
+    }
+
+    for (index, circuit) in general.iter().enumerate() {
+        let (r, g, b) = circuit_rgb(index);
+
+        // Hops whose country tor could not resolve are skipped rather than
+        // guessed at: a line to the wrong continent is worse than a gap.
+        let points: Vec<(f64, f64)> = circuit
+            .hops
+            .iter()
+            .filter_map(|hop| hop.country.as_deref())
+            .filter_map(|c| world.locate(c))
+            .map(|[lon, lat]| projection.project(lon, lat))
+            .collect();
+
+        if points.len() < 2 {
+            continue;
+        }
+
+        // The path.
+        cr.set_source_rgba(r, g, b, 0.85);
+        cr.set_line_width(1.8);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+        cr.move_to(points[0].0, points[0].1);
+        for point in &points[1..] {
+            cr.line_to(point.0, point.1);
+        }
+        let _ = cr.stroke();
+
+        // Hops. The exit is drawn larger and filled, because it is the one the
+        // outside world sees and the one the status panel names.
+        let last = points.len() - 1;
+        for (i, (x, y)) in points.iter().enumerate() {
+            let radius = if i == last { 5.0 } else { 3.0 };
+            cr.set_source_rgba(r, g, b, 1.0);
+            cr.arc(*x, *y, radius, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+
+            if i == last {
+                cr.set_source_rgba(r, g, b, 0.35);
+                cr.arc(*x, *y, radius + 4.0, 0.0, std::f64::consts::TAU);
+                let _ = cr.fill();
+            }
+        }
+    }
+}
+
+/// The circuit palette as floating-point RGB, parsed from the same hex strings
+/// the list uses so the two can never disagree.
+fn circuit_rgb(index: usize) -> (f64, f64, f64) {
+    let hex = CIRCUIT_COLOURS[index % CIRCUIT_COLOURS.len()];
+    let component = |from: usize| {
+        u8::from_str_radix(&hex[from..from + 2], 16).unwrap_or(128) as f64 / 255.0
+    };
+    (component(1), component(3), component(5))
 }
