@@ -270,6 +270,7 @@ fn build_ui(app: &Application) {
         let circuit_list = circuit_list.clone();
         let map_area = map_area.clone();
         let drawn_circuits = drawn_circuits.clone();
+        let zoom = zoom.clone();
         let connect_button = connect_button.clone();
         let activity = activity.clone();
         let spinner = spinner.clone();
@@ -281,6 +282,19 @@ fn build_ui(app: &Application) {
                     Update::Status(report) => {
                         *is_up.borrow_mut() = report.is_up();
                         apply_status(&indicator, &state_label, &detail_label, &connect_button, &report);
+
+                        // Circuits belong to a running tor. Once it is gone they
+                        // are history, and a map still showing them would be
+                        // claiming something that is no longer true. The route
+                        // poll cannot do this itself: it fails while tort is
+                        // down and returns nothing, so the last good answer
+                        // would linger indefinitely.
+                        if !report.is_up() && !drawn_circuits.borrow().is_empty() {
+                            drawn_circuits.borrow_mut().clear();
+                            show_circuits(&circuit_list, &[]);
+                            *zoom.borrow_mut() = 1.0;
+                            map_area.queue_draw();
+                        }
                     }
                     Update::Progress(line) => {
                         progress_label.set_text(&line);
@@ -741,8 +755,44 @@ fn draw_map(
     let fg = area.style_context().color();
     let dim = |alpha: f64| (fg.red() as f64, fg.green() as f64, fg.blue() as f64, alpha);
 
-    // Land outlines, faint: they are a backdrop for the paths, not the subject.
-    let (r, g, b, a) = dim(0.28);
+    // Does this ring cross the edge of the view? Consecutive points then land on
+    // opposite sides, which draws as a streak straight across the map.
+    let wraps = |ring: &[[f64; 2]]| {
+        ring.windows(2).any(|pair| {
+            (projection.wrap(pair[1][0]) - projection.wrap(pair[0][0])).abs() > 180.0
+        })
+    };
+
+    // Land, shaded, so the eye can tell coast from sea without tracing outlines.
+    //
+    // Every ring goes into one path filled with the even-odd rule, which is what
+    // makes holes work: the dataset gives inner rings - the Caspian, Lesotho -
+    // alongside the outer ones, and even-odd punches them out rather than
+    // filling them twice. Rings that cross the view edge are left out, because
+    // filling a broken ring closes it with a straight line across the map.
+    let (r, g, b, a) = dim(0.10);
+    cr.set_source_rgba(r, g, b, a);
+    cr.set_fill_rule(gtk::cairo::FillRule::EvenOdd);
+    for ring in &world.rings {
+        if wraps(ring) {
+            continue;
+        }
+        let mut points = ring.iter();
+        if let Some(first) = points.next() {
+            let (x, y) = projection.project(first[0], first[1]);
+            cr.move_to(x, y);
+            for point in points {
+                let (x, y) = projection.project(point[0], point[1]);
+                cr.line_to(x, y);
+            }
+            cr.close_path();
+        }
+    }
+    let _ = cr.fill();
+
+    // Coastlines over the shading: they are a backdrop for the paths, not the
+    // subject, so they stay faint.
+    let (r, g, b, a) = dim(0.30);
     cr.set_source_rgba(r, g, b, a);
     cr.set_line_width(0.7);
     for ring in &world.rings {
@@ -752,11 +802,8 @@ fn draw_map(
         for point in ring {
             let (lon, lat) = (point[0], point[1]);
             let (x, y) = projection.project(lon, lat);
-
-            // A ring crossing the edge of the view would otherwise be drawn as a
-            // horizontal streak straight across the map, because consecutive
-            // points land on opposite sides. Break the path instead.
-            let wrapped = started && (projection.wrap(lon) - projection.wrap(previous_lon)).abs() > 180.0;
+            let wrapped =
+                started && (projection.wrap(lon) - projection.wrap(previous_lon)).abs() > 180.0;
 
             if !started || wrapped {
                 cr.move_to(x, y);
