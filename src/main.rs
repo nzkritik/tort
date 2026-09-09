@@ -115,7 +115,9 @@ fn main() -> Result<()> {
 /// Ask the daemon, lending it this process's terminal when running a command.
 fn via_daemon(stream: &std::os::unix::net::UnixStream, request: Request) -> Result<i32> {
     let stdio = match request {
-        Request::Run { .. } => Some([
+        // `up` needs the terminal too: tor's bootstrap takes tens of seconds and
+        // the daemon has nowhere else to show progress.
+        Request::Up | Request::Run { .. } => Some([
             std::io::stdin().as_raw_fd(),
             std::io::stdout().as_raw_fd(),
             std::io::stderr().as_raw_fd(),
@@ -141,7 +143,7 @@ fn via_daemon(stream: &std::os::unix::net::UnixStream, request: Request) -> Resu
 /// Do the work in this process. Requires root.
 fn locally(request: Request) -> Result<i32> {
     match request {
-        Request::Up => match DirectRoot.up_and_verify() {
+        Request::Up => match DirectRoot.up_and_verify(&mut std::io::stdout()) {
             Ok(output) => {
                 println!("{output}");
                 Ok(0)

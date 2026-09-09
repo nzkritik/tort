@@ -10,11 +10,13 @@
 //! these four verbs, not "may run arbitrary commands as root".
 
 use anyhow::{bail, Result};
+use std::io::Write;
 
 use crate::{netns, nft, tor};
 
 pub trait Privileged {
-    fn up(&self) -> Result<()>;
+    /// Bring the tunnel up, reporting progress to `out`.
+    fn up(&self, out: &mut dyn Write) -> Result<()>;
     fn down(&self) -> Result<()>;
     fn is_up(&self) -> bool;
 }
@@ -26,12 +28,12 @@ impl DirectRoot {
     /// A tunnel that cannot be shown to carry traffic through Tor is torn down
     /// rather than left running: the whole point of the tool is that a failure
     /// is visible instead of silently leaking.
-    pub fn up_and_verify(&self) -> Result<String> {
+    pub fn up_and_verify(&self, out: &mut dyn Write) -> Result<String> {
         if self.is_up() {
             return Ok("tort is already up.".into());
         }
 
-        self.up()?;
+        self.up(out)?;
 
         let verdict = crate::run::verify_in_namespace()?;
         if !verdict.is_confirmed_safe() {
@@ -66,7 +68,7 @@ impl Privileged for DirectRoot {
     /// at a port nothing is listening on. Because the namespace has no other
     /// route, that window fails closed (connections are refused) rather than
     /// leaking - but refusing to create it at all is better still.
-    fn up(&self) -> Result<()> {
+    fn up(&self, out: &mut dyn Write) -> Result<()> {
         if !tor::is_installed() {
             bail!("tor is not installed - install it with your package manager");
         }
@@ -75,7 +77,7 @@ impl Privileged for DirectRoot {
 
         // From here on, any failure must not leave a half-built namespace
         // behind, so each step tears down on the way out.
-        if let Err(e) = tor::start() {
+        if let Err(e) = tor::start(out) {
             // tor daemonises, so a failure here - a bootstrap timeout in
             // particular - can leave a live daemon behind. Stop it, or the next
             // run finds its ports already bound.

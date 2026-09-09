@@ -119,10 +119,16 @@ fn handle(stream: UnixStream) -> Result<()> {
 
 fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response {
     match request {
-        Request::Up => match DirectRoot.up_and_verify() {
-            Ok(output) => Response::Ok { output },
-            Err(e) => Response::Failed { message: format!("{e:#}") },
-        },
+        Request::Up => {
+            // Progress goes to the caller's own terminal when they lent it to
+            // us, and to the journal otherwise, so a `tort up` triggered by
+            // something without a terminal still leaves a record.
+            let mut out = ProgressSink::new(fds.get(1));
+            match DirectRoot.up_and_verify(&mut out) {
+                Ok(output) => Response::Ok { output },
+                Err(e) => Response::Failed { message: format!("{e:#}") },
+            }
+        }
         Request::Down => match DirectRoot.down() {
             Ok(()) => Response::Ok { output: "tort is down.".into() },
             Err(e) => Response::Failed { message: format!("{e:#}") },
@@ -152,6 +158,39 @@ fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response
                 Err(e) => Response::Failed { message: format!("{e:#}") },
             }
         }
+    }
+}
+
+/// Writes progress to the caller's terminal and to the journal at once.
+///
+/// The journal copy matters for a request with no terminal attached; the
+/// terminal copy matters because the person waiting is looking at it.
+struct ProgressSink {
+    client: Option<std::fs::File>,
+}
+
+impl ProgressSink {
+    fn new(fd: Option<&OwnedFd>) -> Self {
+        let client = fd.and_then(|fd| fd.try_clone().ok()).map(std::fs::File::from);
+        Self { client }
+    }
+}
+
+impl std::io::Write for ProgressSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(f) = self.client.as_mut() {
+            let _ = f.write_all(buf);
+        }
+        // Also to stderr, which systemd routes to the journal.
+        let _ = std::io::stderr().write_all(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(f) = self.client.as_mut() {
+            let _ = f.flush();
+        }
+        std::io::stderr().flush()
     }
 }
 

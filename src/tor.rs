@@ -8,6 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -112,11 +113,11 @@ fn chown_tree(path: &Path, uid: nix::unistd::Uid, gid: nix::unistd::Gid) -> Resu
 }
 
 /// Write the config and start tor, waiting until it is actually serving.
-pub fn start() -> Result<()> {
+pub fn start(out: &mut dyn Write) -> Result<()> {
     // Clear any orphan from an earlier run before binding the same ports.
     let orphans = our_tor_processes();
     if !orphans.is_empty() {
-        eprintln!("  cleaning up {} orphaned tor process(es) from a previous run", orphans.len());
+        let _ = writeln!(out, "  cleaning up {} orphaned tor process(es) from a previous run", orphans.len());
         stop()?;
     }
 
@@ -164,15 +165,15 @@ pub fn start() -> Result<()> {
         }
     }
 
-    let out = Command::new("tor")
+    let launched = Command::new("tor")
         .args(["-f", TORRC])
         .output()
         .context("could not run `tor` - is it installed?")?;
 
-    if !out.status.success() {
+    if !launched.status.success() {
         bail!(
             "tor refused to start: {}",
-            String::from_utf8_lossy(&out.stdout)
+            String::from_utf8_lossy(&launched.stdout)
                 .lines()
                 .filter(|l| l.contains("[warn]") || l.contains("[err]"))
                 .collect::<Vec<_>>()
@@ -186,7 +187,7 @@ pub fn start() -> Result<()> {
     // not readiness (tor cannot carry traffic until it has a consensus and
     // circuits), and probing it makes tor log a spurious NAT-loop warning.
     if is_running() {
-        return wait_for_bootstrap(Duration::from_secs(120));
+        return wait_for_bootstrap(Duration::from_secs(120), out);
     }
 
     bail!(
@@ -199,14 +200,22 @@ pub fn start() -> Result<()> {
 ///
 /// Progress is echoed as it changes, because this legitimately takes tens of
 /// seconds and silence is indistinguishable from a hang.
-pub fn wait_for_bootstrap(timeout: Duration) -> Result<()> {
+/// Progress is written to `out` rather than to this process's stdout.
+///
+/// Under the daemon those two are not the same thing: the daemon's stdout is
+/// the journal, so printing there means the person who typed `tort up` watches
+/// a blank terminal for thirty seconds while the progress they wanted scrolls
+/// past in a log they are not reading. `out` is the caller's own terminal,
+/// lent to the daemon for the duration of the request.
+pub fn wait_for_bootstrap(timeout: Duration, out: &mut dyn Write) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut last_shown = String::new();
 
     loop {
         if let Ok(text) = fs::read_to_string(TOR_LOG) {
             if text.contains("Bootstrapped 100%") {
-                println!("  tor bootstrapped");
+                let _ = writeln!(out, "  tor bootstrapped");
+                let _ = out.flush();
                 return Ok(());
             }
 
@@ -222,7 +231,11 @@ pub fn wait_for_bootstrap(timeout: Duration) -> Result<()> {
                     .unwrap_or_default()
                     .to_string();
                 if progress != last_shown {
-                    println!("  tor: {progress}");
+                    let _ = writeln!(out, "  tor: {progress}");
+                    // Flush every line: this is a progress display, and a
+                    // buffered one arrives all at once at the end, which is the
+                    // opposite of the point.
+                    let _ = out.flush();
                     last_shown = progress;
                 }
             }
