@@ -3,7 +3,7 @@ name = "tort"
 version = "0.1.0"
 edition = "2021"
 description = "Tor Tunnel - route applications through Tor inside an isolated network namespace"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0"
