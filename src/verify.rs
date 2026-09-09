@@ -60,12 +60,11 @@ pub fn describe_result(result: &CheckResult) -> String {
         ));
     }
 
-    // A geo provider that does not recognise the address as a proxy is worth
-    // surfacing: it usually means a recently added exit, and it is the kind of
-    // detail that matters if you are choosing what to do over this circuit.
-    if exit.is_proxy == Some(false) {
-        out.push_str("\n  note      : this provider does not list the address as a known proxy or exit");
-    }
+    // is_proxy is deliberately not reported. The assumption when it was added
+    // was that a geo provider would flag a Tor exit as a proxy; in practice
+    // ip2location returns false for published exits, so the note fired on every
+    // successful connection. A warning that always appears carries no
+    // information and trains the reader to ignore warnings.
 
     out
 }
@@ -259,6 +258,9 @@ mod exit_tests {
         assert!(text.contains("46.102.153.133"));
         assert!(text.contains("Sydney, New South Wales, Australia"));
         assert!(text.contains("AS9009 M247 Europe SRL"));
+        // is_proxy is collected but never displayed: it reads false for real
+        // published exits, so showing it would warn on every good connection.
+        assert!(!text.contains("proxy"));
     }
 
     /// The exit node is never described for a failed verdict.

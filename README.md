@@ -197,9 +197,27 @@ inspecting a circuit tells no third party which relays you are using.
 its user far more than an exit address does - not something to hand out
 unauthenticated on a machine with other local accounts.
 
-Only built, general-purpose circuits are listed. Tor also keeps circuits for
-directory fetches and onion service work, and including them makes the output
-confusing rather than informative.
+Only built, general-purpose circuits are listed in detail — tor also keeps
+circuits for directory fetches and onion service work — but the count of those
+omitted is reported rather than hidden.
+
+### Why the exit in `status` may not appear in `route`
+
+They are answering different questions, and both answers are correct.
+
+Tor maintains several circuits at once and assigns each new connection to one of
+them; it does not pin a process, a destination or a session to a circuit. So
+`tort up` and `tort status` are separate processes making separate connections,
+and each reports the exit of whichever circuit carried *its* request. Seeing two
+different exits seconds apart is normal, and is mildly good for unlinkability.
+
+`tort route` is a snapshot of the circuits that exist at the moment it runs. Tor
+builds them ahead of demand and retires them continuously, so a circuit that
+carried a request moments ago may already be gone, and circuits that have
+carried nothing at all will be listed.
+
+If you want to see which exit a *particular* connection used, ask over that
+connection: `tort run curl -s https://check.torproject.org/api/ip`.
 
 ### Where the exit node lookup goes
 

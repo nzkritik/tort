@@ -34,6 +34,14 @@ pub struct Circuit {
     pub hops: Vec<Hop>,
 }
 
+/// Does this line begin with a three-digit reply code?
+///
+/// Payload lines can look like protocol lines otherwise, which is how a circuit
+/// numbered 100 came to be mistaken for the end of a reply.
+fn is_status_line(line: &str) -> bool {
+    line.len() >= 4 && line.as_bytes()[..3].iter().all(u8::is_ascii_digit)
+}
+
 struct Control {
     stream: TcpStream,
     reader: BufReader<TcpStream>,
@@ -79,6 +87,8 @@ impl Control {
         self.stream.flush()?;
 
         let mut out = String::new();
+        let mut in_data_block = false;
+
         loop {
             let mut line = String::new();
             if self.reader.read_line(&mut line)? == 0 {
@@ -86,16 +96,42 @@ impl Control {
             }
             let line = line.trim_end_matches(['\r', '\n']);
 
-            if line == "." {
+            // Inside a data block every line is payload until a lone ".".
+            // Tracking the block explicitly is what makes this correct: the
+            // previous version decided a line was the final one whenever its
+            // fourth byte was a space, which is true of "250 OK" but also of a
+            // circuit line with a three-digit id - "100 BUILT ..." - so the
+            // circuit list was silently truncated at the hundredth circuit.
+            if in_data_block {
+                if line == "." {
+                    in_data_block = false;
+                } else {
+                    out.push_str(line);
+                    out.push('\n');
+                }
                 continue;
             }
-            out.push_str(line);
-            out.push('\n');
 
-            // A space in the fourth position marks the final line; a "-" or "+"
-            // means more is coming.
-            if line.len() >= 4 && line.as_bytes()[3] == b' ' {
-                break;
+            if !is_status_line(line) {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+
+            match line.as_bytes().get(3) {
+                // "250+key=" opens a data block.
+                Some(b'+') => in_data_block = true,
+                // "250 ..." is the final line of the reply.
+                Some(b' ') => {
+                    out.push_str(line);
+                    out.push('\n');
+                    break;
+                }
+                // "250-key=value" is a mid-reply line.
+                _ => {
+                    out.push_str(line);
+                    out.push('\n');
+                }
             }
         }
         Ok(out)
@@ -200,8 +236,13 @@ pub fn describe(circuits: &[Circuit]) -> String {
         .filter(|c| c.purpose == "GENERAL" && c.state == "BUILT")
         .collect();
 
+    let hidden = circuits.len() - general.len();
+
     if general.is_empty() {
-        return "No general-purpose circuits are currently built.".into();
+        return format!(
+            "No general-purpose circuits are currently built.{}",
+            hidden_note(hidden)
+        );
     }
 
     let mut out = String::new();
@@ -222,7 +263,34 @@ pub fn describe(circuits: &[Circuit]) -> String {
             out.push_str(&format!("  {role}  {:<20} {where_}\n", hop.nickname));
         }
     }
+
+    out.push_str(&hidden_note(hidden));
+
+    // Say this in the output rather than only in the docs. Seeing an exit in
+    // `status` that appears in none of these circuits is otherwise alarming,
+    // when it is ordinary: tor spreads streams over several circuits and
+    // retires them continuously, so this is a snapshot and not a record of
+    // which circuit carried any particular request.
+    if !out.is_empty() {
+        out.push_str(
+            "\nTor assigns each connection to one of several circuits and retires them\n\
+             continuously, so the exit reported by `tort status` is a snapshot from its\n\
+             own request and need not appear above.\n",
+        );
+    }
     out
+}
+
+fn hidden_note(hidden: usize) -> String {
+    if hidden == 0 {
+        String::new()
+    } else {
+        format!(
+            "\n({hidden} further circuit{} not shown: still building, or used for directory\n\
+             fetches and onion services rather than for your traffic.)\n",
+            if hidden == 1 { "" } else { "s" }
+        )
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +317,34 @@ mod tests {
         let c = parse_circuit("7 LAUNCHED PURPOSE=GENERAL").expect("should parse");
         assert_eq!(c.state, "LAUNCHED");
         assert!(c.hops.is_empty());
+    }
+
+    /// A three-digit circuit id must not be mistaken for a reply code.
+    ///
+    /// "100 BUILT ..." has a space in its fourth byte, exactly like "250 OK".
+    /// The first parser stopped reading there, silently truncating the circuit
+    /// list at the hundredth circuit.
+    #[test]
+    fn a_three_digit_circuit_id_is_not_a_status_line() {
+        assert!(is_status_line("250 OK"));
+        assert!(is_status_line("250+circuit-status="));
+        assert!(is_status_line("515 Bad authentication"));
+        assert!(!is_status_line("7 BUILT $AAAA~guard"));
+        // The case that broke it.
+        assert!(is_status_line("100 BUILT $AAAA~guard"));
+    }
+
+    #[test]
+    fn hidden_circuits_are_reported_not_silently_dropped() {
+        let circuits = vec![
+            Circuit { id: "1".into(), state: "BUILT".into(), purpose: "GENERAL".into(),
+                      hops: vec![Hop { nickname: "g".into(), fingerprint: "A".into(),
+                                       address: None, country: None }] },
+            Circuit { id: "2".into(), state: "LAUNCHED".into(), purpose: "GENERAL".into(), hops: vec![] },
+            Circuit { id: "3".into(), state: "BUILT".into(), purpose: "HS_CLIENT_INTRO".into(), hops: vec![] },
+        ];
+        let text = describe(&circuits);
+        assert!(text.contains("2 further circuits not shown"));
     }
 
     #[test]
