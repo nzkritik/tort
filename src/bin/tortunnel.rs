@@ -1,4 +1,4 @@
-//! tortunnel — a GTK4 front end for tort.
+//! Tor Traffic Tunnel — a GTK4 front end for tort.
 //!
 //! Unprivileged by design. Every privileged operation goes to the daemon, which
 //! authorizes it through polkit; the desktop's own authentication dialog appears
@@ -13,6 +13,8 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::{glib, Application, ApplicationWindow, Orientation};
 use std::cell::RefCell;
+use std::io::{BufRead, BufReader};
+use std::os::fd::{AsRawFd, RawFd};
 use std::rc::Rc;
 
 use tort::control::Circuit;
@@ -41,6 +43,8 @@ const CIRCUIT_COLOURS: [&str; 6] = [
 /// What a worker thread finished doing.
 enum Update {
     Status(Box<StatusReport>),
+    /// One line the daemon wrote while working - tor's bootstrap progress.
+    Progress(String),
     Circuits(Vec<Circuit>),
     /// A long operation finished; the text is for the activity line.
     Done(String),
@@ -68,7 +72,7 @@ fn build_ui(app: &Application) {
     let app_button = gtk::Button::with_label("Run app…");
 
     let header = gtk::HeaderBar::new();
-    let title = gtk::Label::new(Some("tortunnel"));
+    let title = gtk::Label::new(Some("Tor Traffic Tunnel"));
     title.add_css_class("title");
     header.set_title_widget(Some(&title));
     header.pack_start(&connect_button);
@@ -82,9 +86,21 @@ fn build_ui(app: &Application) {
     state_label.set_xalign(0.0);
     state_label.add_css_class("title-4");
 
-    let state_row = gtk::Box::new(Orientation::Horizontal, 8);
+    // Progress sits directly under the state text, beside the indicator, so
+    // the eye follows one column while tor bootstraps.
+    let progress_label = gtk::Label::new(None);
+    progress_label.set_xalign(0.0);
+    progress_label.add_css_class("dim-label");
+    progress_label.add_css_class("monospace");
+    progress_label.set_visible(false);
+
+    let state_column = gtk::Box::new(Orientation::Vertical, 2);
+    state_column.append(&state_label);
+    state_column.append(&progress_label);
+
+    let state_row = gtk::Box::new(Orientation::Horizontal, 10);
     state_row.append(&indicator);
-    state_row.append(&state_label);
+    state_row.append(&state_column);
 
     let detail_label = gtk::Label::new(None);
     detail_label.set_xalign(0.0);
@@ -103,6 +119,10 @@ fn build_ui(app: &Application) {
 
     let status_frame = gtk::Frame::new(Some("Status"));
     status_frame.set_child(Some(&status_box));
+    // Size to its contents. Without this the two panels split the column evenly
+    // and the circuit list - which grows - is squeezed by a panel that does not.
+    status_frame.set_vexpand(false);
+    status_frame.set_valign(gtk::Align::Start);
 
     // --- bottom left: circuits ---------------------------------------------
     let circuit_list = gtk::Box::new(Orientation::Vertical, 6);
@@ -171,7 +191,7 @@ fn build_ui(app: &Application) {
 
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("tortunnel")
+        .title("Tor Traffic Tunnel")
         .default_width(1100)
         .default_height(700)
         .child(&root)
@@ -209,6 +229,7 @@ fn build_ui(app: &Application) {
         let indicator = indicator.clone();
         let state_label = state_label.clone();
         let detail_label = detail_label.clone();
+        let progress_label = progress_label.clone();
         let circuit_list = circuit_list.clone();
         let connect_button = connect_button.clone();
         let activity = activity.clone();
@@ -222,6 +243,10 @@ fn build_ui(app: &Application) {
                         *is_up.borrow_mut() = report.is_up();
                         apply_status(&indicator, &state_label, &detail_label, &connect_button, &report);
                     }
+                    Update::Progress(line) => {
+                        progress_label.set_text(&line);
+                        progress_label.set_visible(true);
+                    }
                     Update::Circuits(circuits) => show_circuits(&circuit_list, &circuits),
                     Update::Done(text) => activity.set_text(&text),
                     Update::Failed(message) => {
@@ -231,7 +256,15 @@ fn build_ui(app: &Application) {
                         activity.set_text(&format!("Not authorized: {message}"));
                     }
                     Update::Busy(busy) => {
-                        if busy { spinner.start() } else { spinner.stop() }
+                        if busy {
+                            spinner.start();
+                        } else {
+                            spinner.stop();
+                            // Progress describes work in flight; leaving the
+                            // last line up afterwards would suggest it is still
+                            // happening.
+                            progress_label.set_visible(false);
+                        }
                         connect_button.set_sensitive(!busy);
                     }
                 }
@@ -258,7 +291,7 @@ fn refresh(sender: async_channel::Sender<Update>) {
 /// A read-only query: no busy state, no activity text on success.
 fn spawn_query(sender: async_channel::Sender<Update>, request: Request) {
     std::thread::spawn(move || {
-        let update = match send(&request) {
+        let update = match send(&request, None) {
             Ok(Response::Status(report)) => Update::Status(Box::new(report)),
             Ok(Response::Circuits { circuits }) => Update::Circuits(circuits),
             // A refused or failed poll is not worth interrupting the user over;
@@ -281,7 +314,42 @@ fn spawn_request(sender: async_channel::Sender<Update>, request: Request) {
     let _ = sender.send_blocking(Update::Done(label.to_string()));
 
     std::thread::spawn(move || {
-        let update = match send(&request) {
+        // The daemon reports progress by writing to the stdout its caller lends
+        // it - which is how the CLI shows tor bootstrapping. A GUI has no stdout
+        // worth lending, so it lends a pipe and reads the other end. Same
+        // mechanism, no special case in the daemon.
+        let pipe = nix::unistd::pipe().ok();
+        let progress_writer = pipe.as_ref().map(|(_, w)| w.as_raw_fd());
+
+        if let Some((reader, _)) = pipe.as_ref() {
+            let sender = sender.clone();
+            let reader = reader.try_clone().ok();
+            if let Some(reader) = reader {
+                std::thread::spawn(move || {
+                    let lines = BufReader::new(std::fs::File::from(reader)).lines();
+                    for line in lines.map_while(Result::ok) {
+                        let line = line.trim().to_string();
+                        if !line.is_empty() {
+                            let _ = sender.send_blocking(Update::Progress(line));
+                        }
+                    }
+                });
+            }
+        }
+
+        let devnull = std::fs::File::open("/dev/null").ok();
+        let stdio = match (&devnull, progress_writer) {
+            (Some(null), Some(w)) => Some([null.as_raw_fd(), w, w]),
+            _ => None,
+        };
+
+        let outcome = send(&request, stdio);
+
+        // Close our copy of the write end so the reader thread sees EOF and
+        // stops, rather than lingering for the life of the application.
+        drop(pipe);
+
+        let update = match outcome {
             Ok(Response::Ok { output }) => {
                 Update::Done(output.lines().next().unwrap_or("Done").to_string())
             }
@@ -298,10 +366,10 @@ fn spawn_request(sender: async_channel::Sender<Update>, request: Request) {
     });
 }
 
-fn send(request: &Request) -> anyhow::Result<Response> {
+fn send(request: &Request, stdio: Option<[RawFd; 3]>) -> anyhow::Result<Response> {
     let stream = tort::client::connect()
         .ok_or_else(|| anyhow::anyhow!("the tort daemon is not running (systemctl start tortd)"))?;
-    tort::client::send(&stream, request, None)
+    tort::client::send(&stream, request, stdio)
 }
 
 fn apply_status(
@@ -337,15 +405,18 @@ fn apply_status(
     button.set_label(if report.is_up() { "Disconnect" } else { "Connect" });
 
     let mut lines = vec![
-        format!("namespace       {}", mark(report.namespace)),
-        format!("firewall rules  {}", mark(report.rules)),
-        format!("tor             {}", mark(report.tor)),
+        mark(report.namespace, "namespace"),
+        mark(report.rules, "firewall rules"),
+        mark(report.tor, "tor"),
     ];
 
     if let Some(exit) = report.check.as_ref().and_then(|c| c.exit.as_ref()) {
         lines.push(String::new());
+        // These strings come from a third-party API response and are rendered as
+        // Pango markup, so they are escaped rather than trusted.
+        let esc = |t: &str| glib::markup_escape_text(t).to_string();
         if let Some(ip) = &exit.ip {
-            lines.push(format!("exit node       {ip}"));
+            lines.push(format!("exit node   {}", esc(ip)));
         }
         let place: Vec<&str> = [&exit.city, &exit.region, &exit.country]
             .into_iter()
@@ -353,18 +424,26 @@ fn apply_status(
             .filter(|f| !f.is_empty())
             .collect();
         if !place.is_empty() {
-            lines.push(format!("location        {}", place.join(", ")));
+            lines.push(format!("location    {}", esc(&place.join(", "))));
         }
         if let Some(org) = &exit.org {
-            lines.push(format!("operator        {org}"));
+            lines.push(format!("operator    {}", esc(org)));
         }
     }
 
-    detail.set_text(&lines.join("\n"));
+    detail.set_markup(&lines.join("\n"));
 }
 
-fn mark(present: bool) -> &'static str {
-    if present { "present" } else { "absent" }
+/// A tick or a cross, coloured, with the thing it refers to.
+///
+/// Colour is never the only signal: the glyph differs too, so the display works
+/// without colour vision and survives being pasted somewhere as plain text.
+fn mark(present: bool, label: &str) -> String {
+    if present {
+        format!("<span foreground=\"#7fbf7f\">✓</span>  {label}")
+    } else {
+        format!("<span foreground=\"#888888\">✗</span>  {label}")
+    }
 }
 
 fn show_circuits(list: &gtk::Box, circuits: &[Circuit]) {

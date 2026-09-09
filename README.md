@@ -146,11 +146,16 @@ removed while the tool that knows about them is still installed.
 tortunnel
 ```
 
-A GTK4 front end, built automatically when GTK4 is present. Four areas: a top
-bar with connect/disconnect and buttons to run a shell or an application; a
-status panel with a coloured Tor indicator; a list of circuits, each with a
-colour that will match its path on the map; and the map itself, which is not
-drawn yet.
+"Tor Traffic Tunnel" — a GTK4 front end, built automatically when GTK4 is
+present. Four areas: a top bar with connect/disconnect and buttons to run a
+shell or an application; a status panel with a coloured Tor indicator, live
+bootstrap progress and a tick against each component; a list of circuits, each
+with a colour that will match its path on the map; and the map itself, which is
+not drawn yet.
+
+Bootstrap progress reaches the window through the same mechanism the CLI uses:
+the daemon writes progress to the stdout its caller lends it, and the GUI lends
+it a pipe instead of a terminal. No special case in the daemon.
 
 It is **unprivileged**, like the CLI. Every privileged operation goes to the
 daemon and is authorized through polkit, so your desktop's own authentication

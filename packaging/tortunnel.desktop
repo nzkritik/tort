@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=tortunnel
+Name=Tor Traffic Tunnel
 GenericName=Tor Tunnel
 Comment=Run applications inside a network namespace whose only route out is Tor
 Exec=tortunnel
