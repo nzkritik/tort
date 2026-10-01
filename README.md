@@ -77,7 +77,7 @@ Consequences worth spelling out:
 
 ## Installing
 
-Requires Rust, `tor`, `nftables`, `iproute2` and `polkit`.
+Requires Rust, `tor`, `nftables`, `iproute2`, `cargo` and `polkit`.
 
 ```bash
 git clone https://github.com/nzkritik/tort.git
