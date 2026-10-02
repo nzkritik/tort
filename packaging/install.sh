@@ -56,6 +56,16 @@ else
     # --now both enables at boot and starts immediately; no separate start needed.
     echo "  sudo systemctl enable --now tortd"
 fi
+
+# tort never edits another firewall's rules, so a fresh install behind ufw comes
+# up with no traffic until the interface is allowed. Say so now, not after the
+# first failed `tort up`.
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active" \
+    && ! ufw status 2>/dev/null | grep -q "tort0"; then
+    echo
+    echo "ufw is active. Allow tort's interface once, or the tunnel carries no traffic:"
+    echo "  sudo ufw allow in on tort0"
+fi
 echo
 echo "Then, as your normal user and with no sudo:"
 echo "  tort up"

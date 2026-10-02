@@ -86,8 +86,21 @@ sudo ./packaging/install.sh
 sudo systemctl enable --now tortd
 ```
 
-That is all of it. `enable --now` both enables the unit at boot **and** starts
-it immediately, so no separate `systemctl start` is needed.
+`enable --now` both enables the unit at boot **and** starts it immediately, so
+no separate `systemctl start` is needed.
+
+> [!IMPORTANT]
+> **Running ufw?** Allow tort's interface once, or the tunnel comes up but
+> carries no traffic:
+>
+> ```bash
+> sudo ufw allow in on tort0
+> ```
+>
+> ufw denies new inbound connections by default, and that is how redirected
+> traffic reaches tor. tort never edits another firewall's rules, so this step is
+> yours. It is safe — see
+> [Coexisting with a host firewall](#coexisting-with-a-host-firewall).
 
 The installer builds the binary, installs it to `/usr/local/bin/tort`, and
 installs a polkit policy and a systemd unit. If the daemon is already running it
