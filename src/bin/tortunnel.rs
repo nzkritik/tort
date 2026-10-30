@@ -670,16 +670,45 @@ fn describe_hops(circuit: &Circuit) -> String {
 /// Ask for a command, then run it inside the tunnel.
 fn prompt_for_command(parent: &ApplicationWindow) {
     let entry = gtk::Entry::new();
-    entry.set_placeholder_text(Some("firefox --profile /tmp/tort-firefox"));
+    entry.set_placeholder_text(Some("Choose a saved command above, or type one"));
     entry.set_activates_default(true);
     entry.set_hexpand(true);
 
-    let hint = gtk::Label::new(Some(
+    // Saved commands fill the text field rather than running directly, so one
+    // can be picked and then adjusted - a different profile, an extra flag.
+    // Read each time the dialog opens: an edit to the file shows up without
+    // restarting the application.
+    let path = commands_path();
+    let commands = path.as_deref().map(load_commands).unwrap_or_else(default_commands);
+
+    let mut choices = vec!["Saved commands…"];
+    choices.extend(commands.iter().map(String::as_str));
+    let saved = gtk::DropDown::from_strings(&choices);
+    saved.set_hexpand(true);
+    {
+        let entry = entry.clone();
+        saved.connect_selected_notify(move |saved| {
+            // Item 0 is the heading, not a command.
+            let index = saved.selected() as usize;
+            if let Some(command) = index.checked_sub(1).and_then(|i| commands.get(i)) {
+                entry.set_text(command);
+                entry.grab_focus();
+                entry.set_position(-1);
+            }
+        });
+    }
+
+    let location = match &path {
+        Some(path) => format!("\n\nSaved commands are read from {}, one per line.", path.display()),
+        None => String::new(),
+    };
+    let hint = gtk::Label::new(Some(&format!(
         "Launch a browser with its own profile directory. Started a second time \
          against\nan existing profile, a browser hands the request to the running \
-         instance —\nwhich is outside the tunnel.",
-    ));
+         instance —\nwhich is outside the tunnel.{location}"
+    )));
     hint.set_xalign(0.0);
+    hint.set_selectable(true);
     hint.add_css_class("dim-label");
 
     let content = gtk::Box::new(Orientation::Vertical, 10);
@@ -687,6 +716,7 @@ fn prompt_for_command(parent: &ApplicationWindow) {
     content.set_margin_bottom(16);
     content.set_margin_start(16);
     content.set_margin_end(16);
+    content.append(&saved);
     content.append(&entry);
     content.append(&hint);
 
@@ -712,6 +742,73 @@ fn prompt_for_command(parent: &ApplicationWindow) {
     });
 
     dialog.present();
+}
+
+/// The commands offered by default, and written to the file the first time.
+///
+/// Every one names its own profile directory. A browser started against the
+/// profile it is already running with hands the request to that instance, and
+/// the page opens outside the tunnel - so a separate profile is not a nicety.
+const DEFAULT_COMMANDS: &str = "\
+# Commands offered under \"Run app…\" in tortunnel, one per line.
+# Lines starting with # are ignored. Each runs as `tort run <line>`.
+#
+# Give every browser a profile of its own: started against a profile that is
+# already open, a browser passes the request to the running copy, which is
+# outside the tunnel.
+firefox --profile /tmp/tort-firefox
+google-chrome-stable --user-data-dir=/tmp/tort-chrome
+chromium --user-data-dir=/tmp/tort-chromium
+brave --user-data-dir=/tmp/tort-brave
+brave-origin --user-data-dir=/tmp/tort-brave-origin
+";
+
+/// Where the saved commands live: `$XDG_CONFIG_HOME/tort/commands`.
+fn commands_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".config")))?;
+    Some(base.join("tort").join("commands"))
+}
+
+/// Read the saved commands, writing the defaults first if there is no file.
+///
+/// Seeding the file is what makes it discoverable: the dialog names the path,
+/// and the user finds the examples there to copy. If it cannot be written the
+/// defaults are still offered, and the reason goes to stderr rather than being
+/// dropped.
+fn load_commands(path: &std::path::Path) -> Vec<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_commands(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let written = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(path, DEFAULT_COMMANDS));
+            if let Err(e) = written {
+                eprintln!("tortunnel: could not create {}: {e}", path.display());
+            }
+            default_commands()
+        }
+        Err(e) => {
+            eprintln!("tortunnel: could not read {}: {e}", path.display());
+            default_commands()
+        }
+    }
+}
+
+fn default_commands() -> Vec<String> {
+    parse_commands(DEFAULT_COMMANDS)
+}
+
+/// One command per non-blank line, skipping `#` comments.
+fn parse_commands(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(String::from)
+        .collect()
 }
 
 /// Run a command in the user's terminal.
@@ -996,4 +1093,24 @@ fn circuit_rgb(index: usize) -> (f64, f64, f64) {
         u8::from_str_radix(&hex[from..from + 2], 16).unwrap_or(128) as f64 / 255.0
     };
     (component(1), component(3), component(5))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_commands_skip_comments_and_blank_lines() {
+        let text = "# heading\n\n  firefox --profile /tmp/a  \n#chromium\nbrave\n";
+        assert_eq!(parse_commands(text), ["firefox --profile /tmp/a", "brave"]);
+    }
+
+    #[test]
+    fn every_default_names_its_own_profile() {
+        let commands = default_commands();
+        assert_eq!(commands.len(), 5);
+        for command in &commands {
+            assert!(command.contains("/tmp/tort-"), "no profile in {command}");
+        }
+    }
 }

@@ -175,6 +175,13 @@ bootstrap progress and a tick against each component; a list of circuits, each
 with a colour that will match its path on the map; and the map itself, which is
 not drawn yet.
 
+"Run app…" offers saved commands in a drop-down above the text field; picking
+one fills the field, where it can be edited before running. They are read from
+`~/.config/tort/commands` (or `$XDG_CONFIG_HOME/tort/commands`), one per line,
+`#` for comments. The file is created with examples for Firefox, Chrome,
+Chromium, Brave and Brave Origin the first time the dialog opens, each with a
+profile directory of its own.
+
 Bootstrap progress reaches the window through the same mechanism the CLI uses:
 the daemon writes progress to the stdout its caller lends it, and the GUI lends
 it a pipe instead of a terminal. No special case in the daemon.
