@@ -6,7 +6,7 @@
 
 use anyhow::{bail, Context, Result};
 use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{execvp, fork, ForkResult, Gid, Uid};
+use nix::unistd::{execvp, fork, ForkResult, Gid, Pid, Uid};
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::Command;
@@ -122,6 +122,24 @@ pub fn spawn_in_namespace(
     stdio: &[OwnedFd],
     env: &[(String, String)],
 ) -> Result<i32> {
+    let child = fork_in_namespace(argv, uid, gid, stdio, env)?;
+    wait_for(child)
+}
+
+/// Start a command inside the namespace as `uid` and return without waiting.
+///
+/// Split from the wait so the daemon can fork on its accept loop - where it is
+/// otherwise single-threaded - and wait somewhere else. Waiting on the loop is
+/// what made Disconnect do nothing while a browser was open: the daemon was
+/// still serving the `run` that started it, and every later request, including
+/// the one that would raise the authentication prompt, queued behind it.
+pub fn fork_in_namespace(
+    argv: &[String],
+    uid: u32,
+    gid: u32,
+    stdio: &[OwnedFd],
+    env: &[(String, String)],
+) -> Result<Pid> {
     if argv.is_empty() {
         bail!("no command given");
     }
@@ -168,13 +186,16 @@ pub fn spawn_in_namespace(
             }
             std::process::exit(127);
         }
-        ForkResult::Parent { child } => {
-            match waitpid(child, None).context("waiting for the command")? {
-                WaitStatus::Exited(_, code) => Ok(code),
-                WaitStatus::Signaled(_, sig, _) => Ok(128 + sig as i32),
-                _ => Ok(0),
-            }
-        }
+        ForkResult::Parent { child } => Ok(child),
+    }
+}
+
+/// Wait for a command started by [`fork_in_namespace`] and return its status.
+pub fn wait_for(child: Pid) -> Result<i32> {
+    match waitpid(child, None).context("waiting for the command")? {
+        WaitStatus::Exited(_, code) => Ok(code),
+        WaitStatus::Signaled(_, sig, _) => Ok(128 + sig as i32),
+        _ => Ok(0),
     }
 }
 

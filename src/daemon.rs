@@ -117,12 +117,39 @@ fn handle(stream: UnixStream) -> Result<()> {
         }
     }
 
-    let response = dispatch(request, uid, gid, fds);
-    reply(&stream, &response)
+    match dispatch(request, uid, gid, fds) {
+        Outcome::Reply(response) => reply(&stream, &response),
+        Outcome::Running(child) => {
+            // The caller waits for its program's exit status; the daemon does
+            // not. A browser can stay open for hours, and everything else -
+            // Disconnect above all - must still be served meanwhile.
+            std::thread::spawn(move || {
+                let response = match run::wait_for(child) {
+                    Ok(code) => Response::Exited { code },
+                    Err(e) => Response::Failed { message: format!("{e:#}") },
+                };
+                if let Err(e) = reply(&stream, &response) {
+                    eprintln!("tortd: could not report the exit of pid {child}: {e:#}");
+                }
+            });
+            Ok(())
+        }
+    }
 }
 
-fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response {
-    match request {
+/// What the daemon has to say to a request.
+enum Outcome {
+    /// The answer, ready now.
+    Reply(Response),
+    /// A program was started for the caller; the answer is its exit status.
+    Running(nix::unistd::Pid),
+}
+
+fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Outcome {
+    if let Request::Run { argv, env } = request {
+        return start_run(&argv, &env, uid, gid, &fds);
+    }
+    Outcome::Reply(match request {
         Request::Up => {
             // Progress goes to the caller's own terminal when they lent it to
             // us, and to the journal otherwise, so a `tort up` triggered by
@@ -153,33 +180,47 @@ fn dispatch(request: Request, uid: u32, gid: u32, fds: Vec<OwnedFd>) -> Response
         }
         Request::Route => {
             if !DirectRoot.is_up() {
-                return Response::Failed { message: "tort is not up - run `tort up` first".into() };
-            }
-            match crate::control::circuits() {
-                Ok(circuits) => Response::Circuits { circuits },
-                Err(e) => Response::Failed { message: format!("{e:#}") },
+                Response::Failed { message: "tort is not up - run `tort up` first".into() }
+            } else {
+                match crate::control::circuits() {
+                    Ok(circuits) => Response::Circuits { circuits },
+                    Err(e) => Response::Failed { message: format!("{e:#}") },
+                }
             }
         }
         Request::Onion => match run::onion_in_namespace() {
             Ok(msg) => Response::Ok { output: msg },
             Err(e) => Response::Failed { message: format!("{e:#}") },
         },
-        Request::Run { argv, env } => {
-            if !DirectRoot.is_up() {
-                return Response::Failed {
-                    message: "tort is not up - run `tort up` first".into(),
-                };
-            }
-            if fds.len() != 3 {
-                return Response::Failed {
-                    message: format!("expected 3 file descriptors from the client, got {}", fds.len()),
-                };
-            }
-            match run::spawn_in_namespace(&argv, uid, gid, &fds, &env) {
-                Ok(code) => Response::Exited { code },
-                Err(e) => Response::Failed { message: format!("{e:#}") },
-            }
-        }
+        Request::Run { .. } => unreachable!("handled above"),
+    })
+}
+
+/// Start a program inside the namespace for the caller.
+///
+/// Only the wait moves to a thread. The fork stays on the accept loop, where it
+/// always was, so starting a program is still serialized with everything else
+/// that changes the namespace.
+fn start_run(
+    argv: &[String],
+    env: &[(String, String)],
+    uid: u32,
+    gid: u32,
+    fds: &[OwnedFd],
+) -> Outcome {
+    if !DirectRoot.is_up() {
+        return Outcome::Reply(Response::Failed {
+            message: "tort is not up - run `tort up` first".into(),
+        });
+    }
+    if fds.len() != 3 {
+        return Outcome::Reply(Response::Failed {
+            message: format!("expected 3 file descriptors from the client, got {}", fds.len()),
+        });
+    }
+    match run::fork_in_namespace(argv, uid, gid, fds, env) {
+        Ok(child) => Outcome::Running(child),
+        Err(e) => Outcome::Reply(Response::Failed { message: format!("{e:#}") }),
     }
 }
 
