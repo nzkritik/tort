@@ -15,6 +15,7 @@ use std::fs;
 use std::os::fd::AsFd;
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::config::*;
 
@@ -121,6 +122,10 @@ fn write_resolv_conf() -> Result<()> {
 /// Tear the namespace down. Deleting the namespace also destroys the veth pair
 /// and every address and route inside it, so this cannot half-succeed the way
 /// torc's rule-by-rule teardown could.
+///
+/// That holds only once nothing is running inside. `ip netns delete` removes
+/// the name, but a process still in the namespace keeps it - veth, route and
+/// all - alive and anonymous. Call [`stop_processes`] first.
 pub fn destroy() -> Result<()> {
     if exists() {
         ip(&["netns", "delete", NETNS])?;
@@ -128,6 +133,83 @@ pub fn destroy() -> Result<()> {
     let _ = fs::remove_file(format!("{NETNS_ETC}/resolv.conf"));
     let _ = fs::remove_dir(NETNS_ETC);
     Ok(())
+}
+
+/// Stop every process inside the namespace, politely and then not.
+///
+/// SIGTERM first, so a browser can save its session; SIGKILL for whatever is
+/// still there after a few seconds. Fails if anything survives both, because
+/// tearing the rest down around a live process would leave it holding a
+/// namespace whose traffic no longer goes through Tor.
+pub fn stop_processes() -> Result<()> {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    let signal_all = |signal: Signal| -> Result<bool> {
+        let pids = pids()?;
+        for &pid in &pids {
+            // A process may exit between listing and signalling. That is the
+            // outcome we wanted, so the error is not worth reporting.
+            let _ = kill(Pid::from_raw(pid), signal);
+        }
+        Ok(!pids.is_empty())
+    };
+
+    if !signal_all(Signal::SIGTERM)? {
+        return Ok(());
+    }
+    if wait_until_empty(Duration::from_secs(5))? {
+        return Ok(());
+    }
+
+    signal_all(Signal::SIGKILL)?;
+    if wait_until_empty(Duration::from_secs(2))? {
+        return Ok(());
+    }
+
+    bail!(
+        "could not stop the programs running in the tunnel (pids {:?}); leaving it up",
+        pids()?
+    )
+}
+
+/// Poll until the namespace holds no processes, or the timeout passes.
+fn wait_until_empty(timeout: Duration) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if pids()?.is_empty() {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The processes inside the namespace.
+///
+/// `ip netns pids` compares every process's network namespace with ours, so it
+/// finds programs that entered by setns as well as their children. Exited
+/// processes awaiting reaping no longer have a namespace and are not listed.
+fn pids() -> Result<Vec<i32>> {
+    if !exists() {
+        return Ok(Vec::new());
+    }
+    let out = Command::new("ip")
+        .args(["netns", "pids", NETNS])
+        .output()
+        .context("running `ip netns pids`")?;
+    if !out.status.success() {
+        bail!(
+            "`ip netns pids {NETNS}` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|pid| pid.parse().ok())
+        .collect())
 }
 
 /// Enter the namespace in the *current thread*.

@@ -105,7 +105,15 @@ impl Privileged for DirectRoot {
     /// cannot strand the others - in particular the nftables table is removed
     /// first, since that is the piece whose absence is safe and whose presence
     /// could confuse an unrelated debugging session later.
+    ///
+    /// The exception is the programs running inside, which are stopped before
+    /// anything else and must stop for anything else to happen. The nftables
+    /// table is what drops the namespace's forwarded traffic, and a process
+    /// still inside keeps its veth alive after `ip netns delete`: tearing down
+    /// around it would hand it a route to the host with nothing filtering it.
     fn down(&self) -> Result<()> {
+        netns::stop_processes()?;
+
         let mut first_error = None;
 
         if let Err(e) = nft::remove() {

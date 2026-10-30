@@ -235,7 +235,7 @@ a GUI that blocks its main loop for that long looks like one that has crashed.
 | `tort verify` | Confirm traffic exits through Tor |
 | `tort route` | Show the circuits tor has built, hop by hop |
 | `tort onion` | Fetch a known onion service |
-| `tort down` | Remove everything |
+| `tort down` | Close programs in the tunnel, then remove everything |
 | `tort ruleset` | Print the nftables ruleset without applying it |
 | `tortunnel` | GTK4 graphical front end (see above) |
 
@@ -356,6 +356,11 @@ Fetching http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/ 
 ```
 
 ### `tort down`
+
+Closes every program still running inside the tunnel first - SIGTERM, then
+SIGKILL after five seconds - because a process left inside would keep the
+namespace and its link to the host alive after the firewall rules were gone. If
+something cannot be stopped, the tunnel is left up and the error says so.
 
 Names what it removed, and re-reads the kernel to confirm it went:
 
